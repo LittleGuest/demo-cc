@@ -15,14 +15,19 @@ use anyhow::Context as _;
 use crate::tool::{Tools, tools};
 
 const SYSTEM_PROMPT: &str = r#"You are a coding agent.
-Use bash to inspect and change the workspace. Act first, then report clearly.
+Use the todo tool for multi-step work.
+Keep exactly one step in_progress when a task has multiple steps.
+Refresh the plan as work advances. Prefer tools over prose.
 "#;
+
+const PLAN_REMINDER_INTERVAL: usize = 3;
 
 pub struct LoopState {
     client: AnthropicClient,
     // Anthropic Messages API 要求后续请求携带历史消息，这里保存完整会话轨迹。
     pub context: Vec<Message>,
     tools: Tools,
+    todo_rounds_since_update: usize,
 }
 
 impl LoopState {
@@ -31,6 +36,7 @@ impl LoopState {
             client,
             context: Vec::new(),
             tools: tools(),
+            todo_rounds_since_update: 0,
         }
     }
 
@@ -70,6 +76,7 @@ impl LoopState {
 
     async fn execute_tool_call(&mut self, content: &[ContentBlock]) -> Vec<ContentBlock> {
         let mut result = Vec::new();
+        let mut used_todo = false;
         for block in content {
             if let ContentBlock::ToolUse { id, name, input } = block {
                 // tool_use_id 必须沿用 LLM 返回的 id，否则 API 无法匹配工具调用和工具结果。
@@ -79,6 +86,18 @@ impl LoopState {
                     tool_use_id: id.clone(),
                     content: output,
                 });
+
+                if name == "todo" {
+                    used_todo = true;
+                }
+            }
+        }
+        if used_todo {
+            self.todo_rounds_since_update = 0;
+        } else {
+            self.note_round_without_update();
+            if let Some(reminder) = self.reminder() {
+                result.insert(0, ContentBlock::Text { text: reminder });
             }
         }
         result
@@ -90,13 +109,28 @@ impl LoopState {
         };
         match tool.invoke(input).await {
             Ok(output) => {
-                tracing::info!("Command:{tool_name}\narg:{input}\noutput:\n{output}\n");
+                tracing::info!(
+                    "Command:{tool_name}\narg:{input}\noutput:\n{output}\n",
+                    output = output.chars().take(200).collect::<String>(),
+                );
                 output
             }
             Err(e) => {
                 tracing::error!("Error invoking tool {tool_name}: {e}");
                 format!("Error invoking tool {tool_name}: {e}")
             }
+        }
+    }
+
+    fn note_round_without_update(&mut self) {
+        self.todo_rounds_since_update += 1;
+    }
+
+    fn reminder(&mut self) -> Option<String> {
+        if self.todo_rounds_since_update >= PLAN_REMINDER_INTERVAL {
+            Some("<reminder>Refresh your current plan before continuing.</reminder>".into())
+        } else {
+            None
         }
     }
 

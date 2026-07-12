@@ -33,7 +33,7 @@ impl Tool for WriteFileTool {
         }
     }
 
-    async fn invoke(&self, input: &Value) -> Result<String> {
+    async fn invoke(&mut self, input: &Value) -> Result<String> {
         let path = input
             .get("path")
             .and_then(|v| v.as_str())

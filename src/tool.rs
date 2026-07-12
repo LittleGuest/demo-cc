@@ -7,13 +7,15 @@ use serde_json::Value;
 use crate::{
     ToolSpec,
     tool::{
-        bash::BashTool, edit_file::EditFileTool, read_file::ReadFileTool, write_file::WriteFileTool,
+        bash::BashTool, edit_file::EditFileTool, read_file::ReadFileTool, todo::TodoManagerTool,
+        write_file::WriteFileTool,
     },
 };
 
 pub mod bash;
 pub mod edit_file;
 pub mod read_file;
+pub mod todo;
 pub mod write_file;
 
 pub type Tools = HashMap<String, Box<dyn Tool>>;
@@ -25,7 +27,7 @@ pub trait Tool {
     // tool_spec 会随每次 LLM 请求发送，告诉模型该工具如何被调用。
     fn tool_spec(&self) -> ToolSpec;
     // invoke 接收模型生成的 JSON 参数，返回可写入 ToolResult 的纯文本结果。
-    async fn invoke(&self, input: &Value) -> Result<String>;
+    async fn invoke(&mut self, input: &Value) -> Result<String>;
 }
 
 pub fn tools() -> Tools {
@@ -37,6 +39,10 @@ pub fn tools() -> Tools {
         (
             "write_file".into(),
             Box::new(WriteFileTool) as Box<dyn Tool>,
+        ),
+        (
+            "todo".into(),
+            Box::new(TodoManagerTool::new()) as Box<dyn Tool>,
         ),
     ])
 }
