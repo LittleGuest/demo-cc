@@ -7,21 +7,22 @@ use serde_json::Value;
 use crate::{
     ToolSpec,
     tool::{
-        bash::BashTool, edit_file::EditFileTool, read_file::ReadFileTool, todo::TodoManagerTool,
-        write_file::WriteFileTool,
+        bash::BashTool, edit_file::EditFileTool, read_file::ReadFileTool, sub_agent::SubAgentTool,
+        todo::TodoManagerTool, write_file::WriteFileTool,
     },
 };
 
 pub mod bash;
 pub mod edit_file;
 pub mod read_file;
+pub mod sub_agent;
 pub mod todo;
 pub mod write_file;
 
 pub type Tools = HashMap<String, Box<dyn Tool>>;
 
 #[async_trait]
-pub trait Tool {
+pub trait Tool: Send + Sync {
     // name 必须和暴露给 LLM 的 tool_spec.name 保持一致。
     fn name(&self) -> Cow<'_, str>;
     // tool_spec 会随每次 LLM 请求发送，告诉模型该工具如何被调用。
@@ -30,8 +31,7 @@ pub trait Tool {
     async fn invoke(&mut self, input: &Value) -> Result<String>;
 }
 
-pub fn tools() -> Tools {
-    // 工具名是 LLM 返回 tool_use.name 时的路由键。
+pub fn agent_tools() -> Tools {
     HashMap::from([
         ("bash".into(), Box::new(BashTool) as Box<dyn Tool>),
         ("edit_file".into(), Box::new(EditFileTool) as Box<dyn Tool>),
@@ -40,9 +40,22 @@ pub fn tools() -> Tools {
             "write_file".into(),
             Box::new(WriteFileTool) as Box<dyn Tool>,
         ),
+        ("task".into(), Box::new(SubAgentTool) as Box<dyn Tool>),
         (
             "todo".into(),
             Box::new(TodoManagerTool::new()) as Box<dyn Tool>,
+        ),
+    ])
+}
+
+pub fn subagent_tools() -> Tools {
+    HashMap::from([
+        ("bash".into(), Box::new(BashTool) as Box<dyn Tool>),
+        ("edit_file".into(), Box::new(EditFileTool) as Box<dyn Tool>),
+        ("read_file".into(), Box::new(ReadFileTool) as Box<dyn Tool>),
+        (
+            "write_file".into(),
+            Box::new(WriteFileTool) as Box<dyn Tool>,
         ),
     ])
 }
