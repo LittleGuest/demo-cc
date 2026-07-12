@@ -1,5 +1,3 @@
-pub mod tool;
-
 use std::{collections::HashMap, env};
 
 pub use anthropic_ai_sdk::types::message::Tool as ToolSpec;
@@ -13,6 +11,9 @@ use anthropic_ai_sdk::{
 use anyhow::Context as _;
 
 use crate::tool::Tools;
+
+pub mod skill;
+pub mod tool;
 
 const PLAN_REMINDER_INTERVAL: usize = 3;
 

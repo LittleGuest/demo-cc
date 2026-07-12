@@ -1,4 +1,4 @@
-use std::borrow::Cow;
+use std::{borrow::Cow, sync::Arc};
 
 use anthropic_ai_sdk::types::message::{Message, Role};
 use anyhow::{Context, Result};
@@ -7,16 +7,27 @@ use serde_json::Value;
 
 use crate::{
     LoopState, ToolSpec, get_llm_client,
+    skill::SkillRegistry,
     tool::{Tool, subagent_tools},
 };
 
-pub struct SubAgentTool;
+pub struct SubAgentTool {
+    registry: Arc<SkillRegistry>,
+}
 
 impl SubAgentTool {
-    async fn sub_agent_loop(prompt: &str, description: Option<&str>) -> Result<String> {
+    pub fn new(registry: Arc<SkillRegistry>) -> Self {
+        Self { registry }
+    }
+
+    async fn sub_agent_loop(
+        prompt: &str,
+        description: Option<&str>,
+        registry: Arc<SkillRegistry>,
+    ) -> Result<String> {
         println!("> task - ({}): {}", description.unwrap_or_default(), prompt);
         let client = get_llm_client()?;
-        let tools = subagent_tools();
+        let tools = subagent_tools(registry);
         let system_prompt = format!(
             "You are a coding subagent at {}. Complete the given task, then summarize your findings.",
             std::env::current_dir()?.display()
@@ -63,6 +74,6 @@ impl Tool for SubAgentTool {
             .and_then(|v| v.as_str())
             .context("Invalid prompt")?;
         let description = input.get("description").and_then(|v| v.as_str());
-        Self::sub_agent_loop(prompt, description).await
+        Self::sub_agent_loop(prompt, description, self.registry.clone()).await
     }
 }

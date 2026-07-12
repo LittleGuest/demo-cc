@@ -1,11 +1,13 @@
-use std::env;
+use std::{env, sync::Arc};
 
 use anthropic_ai_sdk::types::message::{Message, Role};
 use anyhow::Context;
-use demo_cc::{LoopState, get_llm_client, tool::agent_tools};
+use demo_cc::{LoopState, get_llm_client, skill::get_skill_registry, tool::agent_tools};
 use inquire::Text;
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
+
+const SKILLS_DIR: &str = "skills";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -23,7 +25,10 @@ async fn main() -> anyhow::Result<()> {
         "You are a coding agent at {}. Use the task tool to delegate exploration or subtasks.",
         env::current_dir()?.display()
     );
-    let tools = agent_tools();
+
+    let skills_dir = env::current_dir()?.join(SKILLS_DIR);
+    let skill_registry = Arc::new(get_skill_registry(skills_dir)?);
+    let tools = agent_tools(skill_registry);
     let mut state = LoopState::new(client, tools, system_prompt, usize::MAX);
 
     loop {
@@ -47,7 +52,7 @@ async fn main() -> anyhow::Result<()> {
             continue;
         };
         println!(
-            "### Final response ###: \n{}",
+            "################## Final response ##################: \n{}",
             LoopState::extract_text(&final_content.content)
         );
     }

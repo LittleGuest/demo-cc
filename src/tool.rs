@@ -1,4 +1,4 @@
-use std::{borrow::Cow, collections::HashMap, env, path::PathBuf};
+use std::{borrow::Cow, collections::HashMap, env, path::PathBuf, sync::Arc};
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -6,14 +6,17 @@ use serde_json::Value;
 
 use crate::{
     ToolSpec,
+    skill::SkillRegistry,
     tool::{
-        bash::BashTool, edit_file::EditFileTool, read_file::ReadFileTool, sub_agent::SubAgentTool,
-        todo::TodoManagerTool, write_file::WriteFileTool,
+        bash::BashTool, edit_file::EditFileTool, load_skill::LoadSkillTool,
+        read_file::ReadFileTool, sub_agent::SubAgentTool, todo::TodoManagerTool,
+        write_file::WriteFileTool,
     },
 };
 
 pub mod bash;
 pub mod edit_file;
+pub mod load_skill;
 pub mod read_file;
 pub mod sub_agent;
 pub mod todo;
@@ -31,7 +34,7 @@ pub trait Tool: Send + Sync {
     async fn invoke(&mut self, input: &Value) -> Result<String>;
 }
 
-pub fn agent_tools() -> Tools {
+pub fn agent_tools(registry: Arc<SkillRegistry>) -> Tools {
     HashMap::from([
         ("bash".into(), Box::new(BashTool) as Box<dyn Tool>),
         ("edit_file".into(), Box::new(EditFileTool) as Box<dyn Tool>),
@@ -40,7 +43,14 @@ pub fn agent_tools() -> Tools {
             "write_file".into(),
             Box::new(WriteFileTool) as Box<dyn Tool>,
         ),
-        ("task".into(), Box::new(SubAgentTool) as Box<dyn Tool>),
+        (
+            "load_skill".into(),
+            Box::new(LoadSkillTool::new(registry.clone())) as Box<dyn Tool>,
+        ),
+        (
+            "task".into(),
+            Box::new(SubAgentTool::new(registry.clone())) as Box<dyn Tool>,
+        ),
         (
             "todo".into(),
             Box::new(TodoManagerTool::new()) as Box<dyn Tool>,
@@ -48,7 +58,7 @@ pub fn agent_tools() -> Tools {
     ])
 }
 
-pub fn subagent_tools() -> Tools {
+pub fn subagent_tools(registry: Arc<SkillRegistry>) -> Tools {
     HashMap::from([
         ("bash".into(), Box::new(BashTool) as Box<dyn Tool>),
         ("edit_file".into(), Box::new(EditFileTool) as Box<dyn Tool>),
@@ -56,6 +66,10 @@ pub fn subagent_tools() -> Tools {
         (
             "write_file".into(),
             Box::new(WriteFileTool) as Box<dyn Tool>,
+        ),
+        (
+            "load_skill".into(),
+            Box::new(LoadSkillTool::new(registry)) as Box<dyn Tool>,
         ),
     ])
 }
