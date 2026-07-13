@@ -10,12 +10,14 @@ use anthropic_ai_sdk::{
 };
 use anyhow::Context as _;
 
-use crate::tool::Tools;
+use crate::{compact::CompactState, tool::Tools};
 
+pub mod compact;
 pub mod skill;
 pub mod tool;
 
 const PLAN_REMINDER_INTERVAL: usize = 3;
+const CONTEXT_LIMIT: usize = 50000;
 
 pub fn get_llm_client() -> anyhow::Result<AnthropicClient> {
     dotenvy::dotenv().ok();
@@ -31,6 +33,10 @@ pub fn get_llm_client() -> anyhow::Result<AnthropicClient> {
     Ok(client)
 }
 
+pub fn get_model() -> anyhow::Result<String> {
+    env::var("ANTHROPIC_MODEL").context("ANTHROPIC_MODEL is not set")
+}
+
 pub struct LoopState {
     client: AnthropicClient,
     // Anthropic Messages API 要求后续请求携带历史消息，这里保存完整会话轨迹。
@@ -39,6 +45,7 @@ pub struct LoopState {
     system_prompt: String,
     max_round: usize,
     todo_rounds_since_update: usize,
+    pub compact_state: CompactState,
 }
 
 impl LoopState {
@@ -55,14 +62,21 @@ impl LoopState {
             system_prompt: system_prompt.into(),
             max_round,
             todo_rounds_since_update: 0,
+            compact_state: CompactState::default(),
         }
     }
 
     pub async fn agent_loop(&mut self) -> anyhow::Result<()> {
         for _ in 0..self.max_round {
+            compact::micro_compact(&mut self.context);
+            if compact::estimate_context_size(&self.context) > CONTEXT_LIMIT {
+                println!("[auto compact]");
+                self.compact_history(None).await?;
+            }
+
             // 每次请求前先规范化历史消息，避免孤立 tool_use 或连续同角色消息破坏 API 约束。
             let request = CreateMessageParams::new(RequiredMessageParams {
-                model: Self::get_model()?,
+                model: get_model()?,
                 messages: self.normalize_messages(),
                 max_tokens: 8000,
             })
@@ -82,22 +96,20 @@ impl LoopState {
                 return Ok(());
             }
 
-            let tool_result = self.execute_tool_call(&response.content).await;
-
-            self.context
-                .push(Message::new_blocks(Role::User, tool_result));
+            self.execute_tool_call(&response.content).await?;
         }
         Ok(())
     }
 
-    async fn execute_tool_call(&mut self, content: &[ContentBlock]) -> Vec<ContentBlock> {
+    async fn execute_tool_call(&mut self, content: &[ContentBlock]) -> anyhow::Result<()> {
         let mut result = Vec::new();
         let mut used_todo = false;
+        let mut manual_compact = false;
+        let mut compact_focus = None;
         for block in content {
             if let ContentBlock::ToolUse { id, name, input } = block {
                 // tool_use_id 必须沿用 LLM 返回的 id，否则 API 无法匹配工具调用和工具结果。
                 let output = self.execute(name, input).await;
-
                 result.push(ContentBlock::ToolResult {
                     tool_use_id: id.clone(),
                     content: output,
@@ -105,6 +117,18 @@ impl LoopState {
 
                 if name == "todo" {
                     used_todo = true;
+                }
+
+                if name == "read_file"
+                    && let Some(path) = input.get("path").and_then(|v| v.as_str())
+                {
+                    self.remember_recent_file(path);
+                }
+
+                if name == "compact" {
+                    println!("[manual compact");
+                    manual_compact = true;
+                    compact_focus = input.get("focus").and_then(|v| v.as_str());
                 }
             }
         }
@@ -116,7 +140,14 @@ impl LoopState {
                 result.insert(0, ContentBlock::Text { text: reminder });
             }
         }
-        result
+        self.context.push(Message::new_blocks(Role::User, result));
+
+        if manual_compact {
+            self.compact_history(compact_focus)
+                .await
+                .context("manual compact failed")?;
+        }
+        Ok(())
     }
 
     async fn execute(&mut self, tool_name: &str, input: &serde_json::Value) -> String {
@@ -148,11 +179,6 @@ impl LoopState {
         } else {
             None
         }
-    }
-
-    fn get_model() -> anyhow::Result<String> {
-        // 模型名属于运行时配置，便于在不同模型之间切换而不改代码。
-        env::var("ANTHROPIC_MODEL").context("ANTHROPIC_MODEL is not set")
     }
 
     pub fn extract_text(content: &MessageContent) -> String {

@@ -15,6 +15,7 @@ use crate::{
 };
 
 pub mod bash;
+pub mod compact;
 pub mod edit_file;
 pub mod load_skill;
 pub mod read_file;
