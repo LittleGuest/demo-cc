@@ -4,6 +4,8 @@ use anthropic_ai_sdk::types::message::{Message, Role};
 use anyhow::Context;
 use demo_cc::{
     LoopState, get_llm_client,
+    hook::HookControl,
+    invoke_hooks,
     permission::{PermissionManager, PermissionMode},
     skill::get_skill_registry,
     tool::agent_tools,
@@ -48,6 +50,25 @@ async fn main() -> anyhow::Result<()> {
     let skill_registry = Arc::new(get_skill_registry(skills_dir)?);
     let tools = agent_tools(skill_registry);
     let mut state = LoopState::new(client, tools, system_prompt, usize::MAX, permission_manager);
+    state.session_start(|_| {
+        Box::pin(async {
+            println!("--- Initializing...");
+            Ok(HookControl::Continue)
+        })
+    });
+    state.pre_tool(|_, tool_use| {
+        println!("--- Before tool call: {tool_use:?}");
+        Box::pin(async move { Ok(HookControl::Continue) })
+    });
+    state.post_tool(|_, tool_use, tool_result| {
+        println!("--- After tool call: {tool_use:?}, result: {tool_result:?}");
+        Box::pin(async move { Ok(HookControl::Continue) })
+    });
+
+    if let HookControl::Block(reason) = invoke_hooks!(SessionStart, &state)? {
+        println!("--- Session blocked: {reason}");
+        return Ok(());
+    }
 
     loop {
         let prompt = Text::new("--- How can I help you? ---\n")

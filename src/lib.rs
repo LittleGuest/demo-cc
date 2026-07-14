@@ -13,11 +13,16 @@ use inquire::Select;
 
 use crate::{
     compact::CompactState,
+    hook::{
+        Hook, HookControl, HookTypes, PostToolUseFn, PreToolUseFn, SessionStartFn, ToolResult,
+        ToolUse,
+    },
     permission::{PermissionBehavior, PermissionDecision, PermissionManager, PermissionMode},
     tool::Tools,
 };
 
 pub mod compact;
+pub mod hook;
 pub mod permission;
 pub mod skill;
 pub mod tool;
@@ -53,6 +58,7 @@ pub struct LoopState {
     todo_rounds_since_update: usize,
     pub compact_state: CompactState,
     pub permission_manager: PermissionManager,
+    pub hooks: Vec<Hook>,
 }
 
 impl LoopState {
@@ -72,6 +78,7 @@ impl LoopState {
             todo_rounds_since_update: 0,
             compact_state: CompactState::default(),
             permission_manager,
+            hooks: Vec::new(),
         }
     }
 
@@ -117,6 +124,19 @@ impl LoopState {
         let mut compact_focus = None;
         for block in content {
             if let ContentBlock::ToolUse { id, name, input } = block {
+                let mut tool_use = ToolUse {
+                    id: id.clone(),
+                    name: name.clone(),
+                    input: input.clone(),
+                };
+                if let HookControl::Block(reason) = invoke_hooks!(PreToolUse, self, &mut tool_use)?
+                {
+                    result.push(ContentBlock::ToolResult {
+                        tool_use_id: tool_use.id.clone(),
+                        content: format!("Tool blocked by PreToolUse hook: {reason}"),
+                    });
+                    continue;
+                }
                 // 权限检查
                 let decision = self.permission_manager.check(name, input);
                 let output;
@@ -146,9 +166,19 @@ impl LoopState {
                         }
                     }
                 }
-                result.push(ContentBlock::ToolResult {
-                    tool_use_id: id.clone(),
+                let mut tool_result = ToolResult {
+                    tool_use_id: tool_use.id.clone(),
                     content: output,
+                };
+                if let HookControl::Block(reason) =
+                    invoke_hooks!(PostToolUse, self, &tool_use, &mut tool_result)?
+                {
+                    tool_result.content = format!("Tool blocked by PostToolUse hook: {reason}");
+                }
+
+                result.push(ContentBlock::ToolResult {
+                    tool_use_id: tool_use.id.clone(),
+                    content: tool_result.content,
                 });
 
                 if name == "todo" {
@@ -203,6 +233,25 @@ impl LoopState {
                 format!("Error invoking tool {tool_name}: {e}")
             }
         }
+    }
+
+    pub fn session_start(&mut self, hook: impl SessionStartFn + 'static) {
+        self.hooks.push(Hook::SessionStart(Box::new(hook)));
+    }
+
+    pub fn pre_tool(&mut self, hook: impl PreToolUseFn + 'static) {
+        self.hooks.push(Hook::PreToolUse(Box::new(hook)));
+    }
+
+    pub fn post_tool(&mut self, hook: impl PostToolUseFn + 'static) {
+        self.hooks.push(Hook::PostToolUse(Box::new(hook)));
+    }
+
+    pub fn hooks_by_type(&self, hook_type: HookTypes) -> Vec<&Hook> {
+        self.hooks
+            .iter()
+            .filter(|hook| hook_type == (*hook).into())
+            .collect()
     }
 
     pub fn handle_mode_command(&mut self, query: &str) -> anyhow::Result<()> {
