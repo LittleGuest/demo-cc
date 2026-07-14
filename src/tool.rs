@@ -84,3 +84,28 @@ fn safe_path(path: &str) -> Result<PathBuf> {
     }
     Ok(full)
 }
+
+/// 与 safe_path 类似，但不要求路径已存在。
+/// 用于 write_file 等需要创建新文件的工具：只做路径穿越检查，不调用 canonicalize。
+fn safe_path_for_write(path: &str) -> Result<PathBuf> {
+    let cwd = env::current_dir()?.canonicalize()?;
+    let full = cwd.join(path);
+    // 将 .. 等相对组件解析后与 cwd 比较，防止路径穿越。
+    let mut components = Vec::new();
+    for comp in full.components() {
+        match comp {
+            std::path::Component::ParentDir => {
+                if components.pop().is_none() {
+                    return Err(anyhow::anyhow!("Path escapes workspace"));
+                }
+            }
+            std::path::Component::CurDir => {}
+            other => components.push(other),
+        }
+    }
+    let resolved: PathBuf = components.iter().collect();
+    if !resolved.starts_with(&cwd) {
+        return Err(anyhow::anyhow!("Path escapes workspace"));
+    }
+    Ok(resolved)
+}

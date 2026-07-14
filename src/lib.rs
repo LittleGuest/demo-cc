@@ -9,10 +9,16 @@ use anthropic_ai_sdk::{
     },
 };
 use anyhow::Context as _;
+use inquire::Select;
 
-use crate::{compact::CompactState, tool::Tools};
+use crate::{
+    compact::CompactState,
+    permission::{PermissionBehavior, PermissionDecision, PermissionManager, PermissionMode},
+    tool::Tools,
+};
 
 pub mod compact;
+pub mod permission;
 pub mod skill;
 pub mod tool;
 
@@ -46,6 +52,7 @@ pub struct LoopState {
     max_round: usize,
     todo_rounds_since_update: usize,
     pub compact_state: CompactState,
+    pub permission_manager: PermissionManager,
 }
 
 impl LoopState {
@@ -54,6 +61,7 @@ impl LoopState {
         tools: Tools,
         system_prompt: impl Into<String>,
         max_round: usize,
+        permission_manager: PermissionManager,
     ) -> Self {
         Self {
             client,
@@ -63,6 +71,7 @@ impl LoopState {
             max_round,
             todo_rounds_since_update: 0,
             compact_state: CompactState::default(),
+            permission_manager,
         }
     }
 
@@ -108,8 +117,35 @@ impl LoopState {
         let mut compact_focus = None;
         for block in content {
             if let ContentBlock::ToolUse { id, name, input } = block {
-                // tool_use_id 必须沿用 LLM 返回的 id，否则 API 无法匹配工具调用和工具结果。
-                let output = self.execute(name, input).await;
+                // 权限检查
+                let decision = self.permission_manager.check(name, input);
+                let output;
+                match decision {
+                    PermissionDecision {
+                        behavior: PermissionBehavior::Deny,
+                        reason,
+                    } => {
+                        output = format!("Permission denied: {reason}");
+                        println!("  [DENIED] {name}: {reason}");
+                    }
+                    PermissionDecision {
+                        behavior: PermissionBehavior::Allow,
+                        ..
+                    } => {
+                        output = self.execute(name, input).await;
+                    }
+                    PermissionDecision {
+                        behavior: PermissionBehavior::Ask,
+                        ..
+                    } => {
+                        if self.permission_manager.ask_user(name, input)? {
+                            output = self.execute(name, input).await;
+                        } else {
+                            output = format!("Permission denied by user for : {name}");
+                            println!("  [USER DENIED] {name}");
+                        }
+                    }
+                }
                 result.push(ContentBlock::ToolResult {
                     tool_use_id: id.clone(),
                     content: output,
@@ -167,6 +203,32 @@ impl LoopState {
                 format!("Error invoking tool {tool_name}: {e}")
             }
         }
+    }
+
+    pub fn handle_mode_command(&mut self, query: &str) -> anyhow::Result<()> {
+        let parts = query.split_whitespace().collect::<Vec<_>>();
+        let mode = if parts.len() == 2 {
+            parts[1].parse::<PermissionMode>().with_context(|| {
+                format!(
+                    "unknown mode: {}. Usage: /mode <default|plan|auto>",
+                    parts[1]
+                )
+            })?
+        } else {
+            Select::new(
+                "Permission mode:",
+                vec![
+                    PermissionMode::Default,
+                    PermissionMode::Plan,
+                    PermissionMode::Auto,
+                ],
+            )
+            .prompt()
+            .context("An error happened or user cancelled the input.")?
+        };
+        self.permission_manager.set_mode(mode);
+        println!("[Switched to {}]", self.permission_manager.mode());
+        Ok(())
     }
 
     fn note_round_without_update(&mut self) {

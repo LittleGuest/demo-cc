@@ -7,6 +7,7 @@ use serde_json::Value;
 
 use crate::{
     LoopState, ToolSpec, get_llm_client,
+    permission::{PermissionManager, PermissionMode},
     skill::SkillRegistry,
     tool::{Tool, subagent_tools},
 };
@@ -32,7 +33,8 @@ impl SubAgentTool {
             "You are a coding subagent at {}. Complete the given task, then summarize your findings.",
             std::env::current_dir()?.display()
         );
-        let mut state = LoopState::new(client, tools, system_prompt, 30);
+        let permission_manager = PermissionManager::try_new(PermissionMode::Auto)?;
+        let mut state = LoopState::new(client, tools, system_prompt, 30, permission_manager);
         state.context.push(Message::new_text(Role::User, prompt));
         state.agent_loop().await?;
         let summary = state

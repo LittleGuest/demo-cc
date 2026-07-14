@@ -7,7 +7,7 @@ use tokio::fs;
 
 use crate::{
     ToolSpec,
-    tool::{Tool, safe_path},
+    tool::{Tool, safe_path_for_write},
 };
 
 pub struct WriteFileTool;
@@ -38,8 +38,8 @@ impl Tool for WriteFileTool {
             .get("path")
             .and_then(|v| v.as_str())
             .context("Invalid path")?;
-        // 写入目标必须解析到当前工作区内。
-        let path = safe_path(path)?;
+        // 写入目标必须解析到当前工作区内，不要求文件已存在。
+        let path = safe_path_for_write(path)?;
 
         let content = input
             .get("content")
