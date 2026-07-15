@@ -37,18 +37,14 @@ impl SubAgentTool {
     ) -> Result<String> {
         println!("> task - ({}): {}", description.unwrap_or_default(), prompt);
         let client = get_llm_client()?;
-        let tools = subagent_tools(registry);
-        let system_prompt = format!(
-            "You are a coding subagent at {}. Complete the given task, then summarize your findings.",
-            std::env::current_dir()?.display()
-        );
+        let tools = subagent_tools(registry.clone());
         let permission_manager = PermissionManager::try_new(PermissionMode::Auto)?;
         let mut state = LoopState::new(
             client,
             tools,
-            system_prompt,
             30,
             permission_manager,
+            registry.clone(),
             memory_manager,
         );
         state.context.push(Message::new_text(Role::User, prompt));

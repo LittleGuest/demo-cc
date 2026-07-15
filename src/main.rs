@@ -45,23 +45,19 @@ async fn main() -> anyhow::Result<()> {
     println!("[Permission mode: {}]", permission_manager.mode());
 
     let client = get_llm_client()?;
-    let system_prompt = format!(
-        "You are a coding agent at {}. Use the task tool to delegate exploration or subtasks.",
-        env::current_dir()?.display()
-    );
 
     let skills_dir = env::current_dir()?.join(SKILLS_DIR);
     let skill_registry = Arc::new(get_skill_registry(skills_dir)?);
     let memory_manager = Arc::new(Mutex::new(MemoryManager::init(
         env::current_dir()?.join(".memory"),
     )?));
-    let tools = agent_tools(skill_registry, memory_manager.clone());
+    let tools = agent_tools(skill_registry.clone(), memory_manager.clone());
     let mut state = LoopState::new(
         client,
         tools,
-        system_prompt,
         usize::MAX,
         permission_manager,
+        skill_registry.clone(),
         memory_manager.clone(),
     );
     state.session_start(|_| {
