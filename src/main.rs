@@ -1,4 +1,7 @@
-use std::{env, sync::Arc};
+use std::{
+    env,
+    sync::{Arc, Mutex},
+};
 
 use anthropic_ai_sdk::types::message::{Message, Role};
 use anyhow::Context;
@@ -6,6 +9,7 @@ use demo_cc::{
     LoopState, get_llm_client,
     hook::HookControl,
     invoke_hooks,
+    memory::MemoryManager,
     permission::{PermissionManager, PermissionMode},
     skill::get_skill_registry,
     tool::agent_tools,
@@ -48,8 +52,18 @@ async fn main() -> anyhow::Result<()> {
 
     let skills_dir = env::current_dir()?.join(SKILLS_DIR);
     let skill_registry = Arc::new(get_skill_registry(skills_dir)?);
-    let tools = agent_tools(skill_registry);
-    let mut state = LoopState::new(client, tools, system_prompt, usize::MAX, permission_manager);
+    let memory_manager = Arc::new(Mutex::new(MemoryManager::init(
+        env::current_dir()?.join(".memory"),
+    )?));
+    let tools = agent_tools(skill_registry, memory_manager.clone());
+    let mut state = LoopState::new(
+        client,
+        tools,
+        system_prompt,
+        usize::MAX,
+        permission_manager,
+        memory_manager.clone(),
+    );
     state.session_start(|_| {
         Box::pin(async {
             println!("--- Initializing...");
@@ -74,19 +88,28 @@ async fn main() -> anyhow::Result<()> {
         let prompt = Text::new("--- How can I help you? ---\n")
             .prompt()
             .context("An error happend or user cancelled the input.")?;
+        let prompt = prompt.trim();
 
-        if prompt.trim().is_empty() {
+        if prompt.is_empty() {
             continue;
         }
 
-        if ".exit".eq(prompt.trim()) {
+        if ".exit".eq(prompt) {
             break;
         }
 
-        if ".rules".eq(prompt.trim()) {
+        if ".rules".eq(prompt) {
             for (index, rule) in state.permission_manager.rules().iter().enumerate() {
                 println!("  {index}: {rule}")
             }
+            continue;
+        }
+
+        if ".memory".eq(prompt) {
+            let memory_manager = memory_manager
+                .lock()
+                .map_err(|_| anyhow::anyhow!("memory manager lock poisoned"))?;
+            println!("{}", memory_manager.describe_memories());
             continue;
         }
 

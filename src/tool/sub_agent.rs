@@ -1,4 +1,7 @@
-use std::{borrow::Cow, sync::Arc};
+use std::{
+    borrow::Cow,
+    sync::{Arc, Mutex},
+};
 
 use anthropic_ai_sdk::types::message::{Message, Role};
 use anyhow::{Context, Result};
@@ -7,6 +10,7 @@ use serde_json::Value;
 
 use crate::{
     LoopState, ToolSpec, get_llm_client,
+    memory::MemoryManager,
     permission::{PermissionManager, PermissionMode},
     skill::SkillRegistry,
     tool::{Tool, subagent_tools},
@@ -14,17 +18,22 @@ use crate::{
 
 pub struct SubAgentTool {
     registry: Arc<SkillRegistry>,
+    memory_manager: Arc<Mutex<MemoryManager>>,
 }
 
 impl SubAgentTool {
-    pub fn new(registry: Arc<SkillRegistry>) -> Self {
-        Self { registry }
+    pub fn new(registry: Arc<SkillRegistry>, memory_manager: Arc<Mutex<MemoryManager>>) -> Self {
+        Self {
+            registry,
+            memory_manager,
+        }
     }
 
     async fn sub_agent_loop(
         prompt: &str,
         description: Option<&str>,
         registry: Arc<SkillRegistry>,
+        memory_manager: Arc<Mutex<MemoryManager>>,
     ) -> Result<String> {
         println!("> task - ({}): {}", description.unwrap_or_default(), prompt);
         let client = get_llm_client()?;
@@ -34,7 +43,14 @@ impl SubAgentTool {
             std::env::current_dir()?.display()
         );
         let permission_manager = PermissionManager::try_new(PermissionMode::Auto)?;
-        let mut state = LoopState::new(client, tools, system_prompt, 30, permission_manager);
+        let mut state = LoopState::new(
+            client,
+            tools,
+            system_prompt,
+            30,
+            permission_manager,
+            memory_manager,
+        );
         state.context.push(Message::new_text(Role::User, prompt));
         state.agent_loop().await?;
         let summary = state
@@ -76,6 +92,12 @@ impl Tool for SubAgentTool {
             .and_then(|v| v.as_str())
             .context("Invalid prompt")?;
         let description = input.get("description").and_then(|v| v.as_str());
-        Self::sub_agent_loop(prompt, description, self.registry.clone()).await
+        Self::sub_agent_loop(
+            prompt,
+            description,
+            self.registry.clone(),
+            self.memory_manager.clone(),
+        )
+        .await
     }
 }

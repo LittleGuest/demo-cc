@@ -1,4 +1,8 @@
-use std::{collections::HashMap, env};
+use std::{
+    collections::HashMap,
+    env,
+    sync::{Arc, Mutex},
+};
 
 pub use anthropic_ai_sdk::types::message::Tool as ToolSpec;
 use anthropic_ai_sdk::{
@@ -8,7 +12,7 @@ use anthropic_ai_sdk::{
         RequiredMessageParams, Role, StopReason,
     },
 };
-use anyhow::Context as _;
+use anyhow::{Context as _, Result};
 use inquire::Select;
 
 use crate::{
@@ -17,12 +21,14 @@ use crate::{
         Hook, HookControl, HookTypes, PostToolUseFn, PreToolUseFn, SessionStartFn, ToolResult,
         ToolUse,
     },
+    memory::{MEMORY_GUIDANCE, MemoryManager},
     permission::{PermissionBehavior, PermissionDecision, PermissionManager, PermissionMode},
     tool::Tools,
 };
 
 pub mod compact;
 pub mod hook;
+pub mod memory;
 pub mod permission;
 pub mod skill;
 pub mod tool;
@@ -59,6 +65,7 @@ pub struct LoopState {
     pub compact_state: CompactState,
     pub permission_manager: PermissionManager,
     pub hooks: Vec<Hook>,
+    pub memory_manager: Arc<Mutex<MemoryManager>>,
 }
 
 impl LoopState {
@@ -68,6 +75,7 @@ impl LoopState {
         system_prompt: impl Into<String>,
         max_round: usize,
         permission_manager: PermissionManager,
+        memory_manager: Arc<Mutex<MemoryManager>>,
     ) -> Self {
         Self {
             client,
@@ -79,7 +87,25 @@ impl LoopState {
             compact_state: CompactState::default(),
             permission_manager,
             hooks: Vec::new(),
+            memory_manager,
         }
+    }
+
+    fn build_system_prompt(&self) -> Result<String> {
+        let mut parts = vec![format!(
+            "You are a coding agent at {}. Use tools to solve tasks.",
+            env::current_dir()?.display(),
+        )];
+        let memory_prompt = self
+            .memory_manager
+            .lock()
+            .map_err(|_| anyhow::anyhow!("memory manager lock poisoned"))?
+            .load_memory_prompt();
+        if !memory_prompt.is_empty() {
+            parts.push(memory_prompt);
+        }
+        parts.push(MEMORY_GUIDANCE.trim().into());
+        Ok(parts.join("\n\n"))
     }
 
     pub async fn agent_loop(&mut self) -> anyhow::Result<()> {
@@ -90,13 +116,13 @@ impl LoopState {
                 self.compact_history(None).await?;
             }
 
-            // 每次请求前先规范化历史消息，避免孤立 tool_use 或连续同角色消息破坏 API 约束。
+            let system_prompt = self.build_system_prompt()?;
             let request = CreateMessageParams::new(RequiredMessageParams {
                 model: get_model()?,
                 messages: self.normalize_messages(),
                 max_tokens: 8000,
             })
-            .with_system(&self.system_prompt)
+            .with_system(system_prompt)
             .with_tools(self.tools.values().map(|tool| tool.tool_spec()).collect());
 
             let response = self.client.create_message(Some(&request)).await?;

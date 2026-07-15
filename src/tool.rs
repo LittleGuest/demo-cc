@@ -1,4 +1,10 @@
-use std::{borrow::Cow, collections::HashMap, env, path::PathBuf, sync::Arc};
+use std::{
+    borrow::Cow,
+    collections::HashMap,
+    env,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -6,9 +12,10 @@ use serde_json::Value;
 
 use crate::{
     ToolSpec,
+    memory::MemoryManager,
     skill::SkillRegistry,
     tool::{
-        bash::BashTool, edit_file::EditFileTool, load_skill::LoadSkillTool,
+        bash::BashTool, edit_file::EditFileTool, load_skill::LoadSkillTool, memory::SaveMemoryTool,
         read_file::ReadFileTool, sub_agent::SubAgentTool, todo::TodoManagerTool,
         write_file::WriteFileTool,
     },
@@ -18,6 +25,7 @@ pub mod bash;
 pub mod compact;
 pub mod edit_file;
 pub mod load_skill;
+pub mod memory;
 pub mod read_file;
 pub mod sub_agent;
 pub mod todo;
@@ -35,7 +43,10 @@ pub trait Tool: Send + Sync {
     async fn invoke(&mut self, input: &Value) -> Result<String>;
 }
 
-pub fn agent_tools(registry: Arc<SkillRegistry>) -> Tools {
+pub fn agent_tools(
+    registry: Arc<SkillRegistry>,
+    memory_manager: Arc<Mutex<MemoryManager>>,
+) -> Tools {
     HashMap::from([
         ("bash".into(), Box::new(BashTool) as Box<dyn Tool>),
         ("edit_file".into(), Box::new(EditFileTool) as Box<dyn Tool>),
@@ -49,8 +60,12 @@ pub fn agent_tools(registry: Arc<SkillRegistry>) -> Tools {
             Box::new(LoadSkillTool::new(registry.clone())) as Box<dyn Tool>,
         ),
         (
+            "save_memory".into(),
+            Box::new(SaveMemoryTool::new(memory_manager.clone())) as Box<dyn Tool>,
+        ),
+        (
             "task".into(),
-            Box::new(SubAgentTool::new(registry.clone())) as Box<dyn Tool>,
+            Box::new(SubAgentTool::new(registry.clone(), memory_manager.clone())) as Box<dyn Tool>,
         ),
         (
             "todo".into(),
