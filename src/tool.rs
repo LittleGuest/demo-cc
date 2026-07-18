@@ -14,10 +14,11 @@ use crate::{
     ToolSpec,
     memory::MemoryManager,
     skill::SkillRegistry,
+    task::SharedTaskManager,
     tool::{
         bash::BashTool, edit_file::EditFileTool, load_skill::LoadSkillTool, memory::SaveMemoryTool,
-        read_file::ReadFileTool, sub_agent::SubAgentTool, todo::TodoManagerTool,
-        write_file::WriteFileTool,
+        read_file::ReadFileTool, sub_agent::SubAgentTool, task_create::TaskCreateTool,
+        todo::TodoManagerTool, write_file::WriteFileTool,
     },
 };
 
@@ -28,6 +29,10 @@ pub mod load_skill;
 pub mod memory;
 pub mod read_file;
 pub mod sub_agent;
+pub mod task_create;
+pub mod task_get;
+pub mod task_list;
+pub mod task_update;
 pub mod todo;
 pub mod write_file;
 
@@ -46,6 +51,7 @@ pub trait Tool: Send + Sync {
 pub fn agent_tools(
     registry: Arc<SkillRegistry>,
     memory_manager: Arc<Mutex<MemoryManager>>,
+    task_manager: SharedTaskManager,
 ) -> Tools {
     HashMap::from([
         ("bash".into(), Box::new(BashTool) as Box<dyn Tool>),
@@ -70,6 +76,10 @@ pub fn agent_tools(
         (
             "todo".into(),
             Box::new(TodoManagerTool::new()) as Box<dyn Tool>,
+        ),
+        (
+            "task_create".into(),
+            Box::new(TaskCreateTool::new(task_manager)) as Box<dyn Tool>,
         ),
     ])
 }

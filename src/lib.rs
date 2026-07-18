@@ -38,6 +38,7 @@ pub mod memory;
 pub mod permission;
 pub mod prompt;
 pub mod skill;
+pub mod task;
 pub mod tool;
 
 const PLAN_REMINDER_INTERVAL: usize = 3;

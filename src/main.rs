@@ -12,6 +12,7 @@ use demo_cc::{
     memory::MemoryManager,
     permission::{PermissionManager, PermissionMode},
     skill::get_skill_registry,
+    task::SharedTaskManager,
     tool::agent_tools,
 };
 use inquire::{Select, Text};
@@ -51,7 +52,8 @@ async fn main() -> anyhow::Result<()> {
     let memory_manager = Arc::new(Mutex::new(MemoryManager::init(
         env::current_dir()?.join(".memory"),
     )?));
-    let tools = agent_tools(skill_registry.clone(), memory_manager.clone());
+    let task_manager = SharedTaskManager::new(env::current_dir()?.join(".tasks"))?;
+    let tools = agent_tools(skill_registry.clone(), memory_manager.clone(), task_manager);
     let mut state = LoopState::new(
         client,
         tools,
