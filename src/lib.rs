@@ -3,6 +3,8 @@ use std::{
     env,
     path::Path,
     sync::{Arc, Mutex},
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 pub use anthropic_ai_sdk::types::message::Tool as ToolSpec;
@@ -39,7 +41,12 @@ pub mod skill;
 pub mod tool;
 
 const PLAN_REMINDER_INTERVAL: usize = 3;
-const CONTEXT_LIMIT: usize = 50000;
+const MAX_RECOVERY_ATTEMPTS: u32 = 3;
+const BACKOFF_BASE_DELAY_SECS: f64 = 1.0;
+const BACKOFF_MAX_DELAY_SECS: f64 = 30.0;
+const CONTEXT_THRESHOLD_CHARS: usize = 50_000;
+const CONTINUATION_MESSAGE: &str = "Output limit hit. Continue directly from where you stopped. \
+No recap, no repetition. Pick up mid-sentence if needed.";
 
 pub fn get_llm_client() -> anyhow::Result<AnthropicClient> {
     dotenvy::dotenv().ok();
@@ -57,6 +64,52 @@ pub fn get_llm_client() -> anyhow::Result<AnthropicClient> {
 
 pub fn get_model() -> anyhow::Result<String> {
     env::var("ANTHROPIC_MODEL").context("ANTHROPIC_MODEL is not set")
+}
+
+fn is_prompt_too_long_error(error_text: &str) -> bool {
+    (error_text.contains("prompt") && error_text.contains("long"))
+        || error_text.contains("overlong_prompt")
+        || error_text.contains("too many tokens")
+        || error_text.contains("context length")
+}
+
+fn is_transient_transport_error(error_text: &str) -> bool {
+    [
+        "timeout",
+        "timed out",
+        "rate limit",
+        "too many requests",
+        "unavailable",
+        "connection",
+        "overloaded",
+        "temporarily",
+        "econnreset",
+        "broken pipe",
+    ]
+    .iter()
+    .any(|needle| error_text.contains(needle))
+}
+
+fn backoff_delay(attempt: u32) -> Duration {
+    let base = (BACKOFF_BASE_DELAY_SECS * 2f64.powi(attempt as i32)).min(BACKOFF_MAX_DELAY_SECS);
+    let jitter = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| (duration.subsec_millis() % 1000) as f64 / 1000.0)
+        .unwrap_or(0.0);
+    Duration::from_secs_f64(base + jitter)
+}
+
+#[derive(Debug, Default)]
+struct RecoveryState {
+    continuation_attempts: u32,
+    compact_attempts: u32,
+    transport_attempts: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LoopControl {
+    Continue,
+    Stop,
 }
 
 pub struct LoopState {
@@ -197,13 +250,77 @@ impl LoopState {
             .context("failed to render system prompt")
     }
 
+    async fn handle_request_error_recovery(
+        &mut self,
+        error: MessageError,
+        recovery: &mut RecoveryState,
+    ) -> Result<LoopControl> {
+        let error_text = error.to_string().to_lowercase();
+        if is_prompt_too_long_error(&error_text) {
+            if recovery.compact_attempts >= MAX_RECOVERY_ATTEMPTS {
+                println!(
+                    "[Error] compact recovery exhausted after {MAX_RECOVERY_ATTEMPTS} attempts: {error}"
+                );
+                return Ok(LoopControl::Stop);
+            }
+            recovery.compact_attempts += 1;
+            println!(
+                "[Recovery] compact ({}/{}): context too large",
+                recovery.compact_attempts, MAX_RECOVERY_ATTEMPTS
+            );
+            if let Err(compact_error) = self.compact_history(None).await {
+                println!("[Error] compact recovery failed: {}", compact_error);
+                return Ok(LoopControl::Stop);
+            }
+            return Ok(LoopControl::Continue);
+        }
+
+        if is_transient_transport_error(&error_text) {
+            if recovery.compact_attempts >= MAX_RECOVERY_ATTEMPTS {
+                println!(
+                    "[Error] transport recovery exhausted after {MAX_RECOVERY_ATTEMPTS} attempts: {error}"
+                );
+                return Ok(LoopControl::Stop);
+            }
+            let delay = backoff_delay(recovery.transport_attempts);
+            recovery.compact_attempts += 1;
+            println!(
+                "[Recovery] backoff ({}/{}): transient transport failure. Retrying in {:.1}s",
+                recovery.transport_attempts,
+                MAX_RECOVERY_ATTEMPTS,
+                delay.as_secs_f64()
+            );
+            thread::sleep(delay);
+            return Ok(LoopControl::Continue);
+        }
+
+        println!("[Error] API call failed: {error}");
+        Ok(LoopControl::Stop)
+    }
+
+    fn handle_max_tokens_recovery(&mut self, recovery: &mut RecoveryState) -> bool {
+        if recovery.continuation_attempts >= MAX_RECOVERY_ATTEMPTS {
+            println!(
+                "[Error] continuation recovery exhausted after {} attempts",
+                MAX_RECOVERY_ATTEMPTS
+            );
+            return false;
+        }
+
+        recovery.continuation_attempts += 1;
+        println!(
+            "[Recovery] continue ({}/{}): output truncated",
+            recovery.continuation_attempts, MAX_RECOVERY_ATTEMPTS
+        );
+        self.context
+            .push(Message::new_text(Role::User, CONTINUATION_MESSAGE));
+        true
+    }
+
     pub async fn agent_loop(&mut self) -> anyhow::Result<()> {
+        let mut recovery = RecoveryState::default();
         for _ in 0..self.max_round {
             compact::micro_compact(&mut self.context);
-            if compact::estimate_context_size(&self.context) > CONTEXT_LIMIT {
-                println!("[auto compact]");
-                self.compact_history(None).await?;
-            }
 
             let system_prompt = self.build_system_prompt()?;
             let request = CreateMessageParams::new(RequiredMessageParams {
@@ -214,12 +331,36 @@ impl LoopState {
             .with_system(system_prompt)
             .with_tools(self.tools.values().map(|tool| tool.tool_spec()).collect());
 
-            let response = self.client.create_message(Some(&request)).await?;
+            let Some(response) = (match self.client.create_message(Some(&request)).await {
+                Ok(response) => {
+                    recovery.transport_attempts = 0;
+                    Some(response)
+                }
+                Err(error) => {
+                    match self
+                        .handle_request_error_recovery(error, &mut recovery)
+                        .await?
+                    {
+                        LoopControl::Continue => continue,
+                        LoopControl::Stop => None,
+                    }
+                }
+            }) else {
+                return Ok(());
+            };
 
             self.context.push(Message::new_blocks(
                 Role::Assistant,
                 response.content.clone(),
             ));
+
+            if matches!(response.stop_reason, Some(StopReason::MaxTokens))
+                && self.handle_max_tokens_recovery(&mut recovery)
+            {
+                continue;
+            }
+
+            recovery.continuation_attempts = 0;
 
             if let Some(stop_reason) = response.stop_reason
                 && !matches!(stop_reason, StopReason::ToolUse)
@@ -228,6 +369,7 @@ impl LoopState {
             }
 
             self.execute_tool_call(&response.content).await?;
+            self.maybe_auto_compact().await?;
         }
         Ok(())
     }

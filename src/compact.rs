@@ -10,9 +10,9 @@ use anthropic_ai_sdk::types::message::{
     ContentBlock, CreateMessageParams, Message, MessageClient, MessageContent,
     RequiredMessageParams, Role,
 };
-use anyhow::Context;
+use anyhow::{Context, Result};
 
-use crate::{LoopState, get_model};
+use crate::{CONTEXT_THRESHOLD_CHARS, LoopState, get_model};
 
 const KEEP_RECENT_TOOL_RESULTS: usize = 3;
 const PERSIST_THRESHOLD: usize = 30000;
@@ -195,6 +195,17 @@ impl LoopState {
             let overflow = self.compact_state.recent_files.len() - 5;
             self.compact_state.recent_files.drain(0..overflow);
         }
+    }
+
+    pub async fn maybe_auto_compact(&mut self) -> Result<()> {
+        if estimate_context_size(&self.context) <= CONTEXT_THRESHOLD_CHARS {
+            return Ok(());
+        }
+
+        println!("[Recovery] compact: context estimate exceeded threshold");
+        self.compact_history(None)
+            .await
+            .context("proactive compact failed")
     }
 
     pub async fn compact_history(&mut self, focus: Option<&str>) -> anyhow::Result<()> {
