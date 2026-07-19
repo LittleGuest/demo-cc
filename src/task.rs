@@ -1,16 +1,23 @@
-use std::{
-    fs,
-    path::{Path, PathBuf},
-    sync::{Arc, Mutex},
-};
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use strum::EnumProperty;
-use strum_macros::{Display, EnumProperty, EnumString};
+use strum_macros::{Display, EnumProperty as EnumPropertyDerive, EnumString};
+
+use crate::store::{CollectionStore, Store, StoreRoot};
 
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, EnumString, Display, EnumProperty,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    EnumString,
+    Display,
+    EnumPropertyDerive,
 )]
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
@@ -60,6 +67,17 @@ impl TaskRecord {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskIndex {
+    pub next_id: u64,
+}
+
+impl Default for TaskIndex {
+    fn default() -> Self {
+        Self { next_id: 1 }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct TaskUpdate {
     pub status: Option<TaskStatus>,
@@ -70,92 +88,39 @@ pub struct TaskUpdate {
 
 #[derive(Debug)]
 pub struct TaskManager {
-    dir: PathBuf,
-    next_id: u64,
+    tasks: CollectionStore<TaskRecord>,
+    index: Store<TaskIndex>,
 }
 
 impl TaskManager {
-    pub fn new(tasks_dir: impl AsRef<Path>) -> Result<Self> {
-        let dir = tasks_dir.as_ref().to_path_buf();
-        fs::create_dir_all(&dir)
-            .with_context(|| format!("failed to create tasks directory {}", dir.display()))?;
-        let next_id = Self::max_task_id(&dir)? + 1;
-
-        Ok(Self { dir, next_id })
-    }
-
-    fn load(&self, task_id: u64) -> Result<TaskRecord> {
-        let path = self.task_path(task_id);
-        let content =
-            fs::read_to_string(&path).with_context(|| format!("Task {} no found", task_id))?;
-        serde_json::from_str(&content)
-            .with_context(|| format!("failed to parse task file {}", path.display()))
-    }
-
-    fn load_all(&self) -> Result<Vec<TaskRecord>> {
-        let mut tasks = Vec::new();
-        for entry in fs::read_dir(&self.dir)
-            .with_context(|| format!("failed to read task directory {}", self.dir.display()))?
-        {
-            let entry = entry?;
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
-            let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
-                continue;
-            };
-            if !name.starts_with("task_") || !name.ends_with(".json") {
-                continue;
-            }
-
-            let content = fs::read_to_string(&path)?;
-            let task = serde_json::from_str(&content)
-                .with_context(|| format!("failed to parse task file {}", path.display()))?;
-            tasks.push(task);
+    pub fn new(root: &StoreRoot) -> Result<Self> {
+        let manager = Self {
+            tasks: root.collection("tasks")?,
+            index: root.file("tasks/index.json")?,
+        };
+        if !manager.index.exists() {
+            manager.index.write(&TaskIndex::default())?;
         }
-        Ok(tasks)
+        Ok(manager)
     }
 
-    fn task_path(&self, task_id: u64) -> PathBuf {
-        self.dir.join(format!("task_{task_id}.json"))
+    pub fn create(&mut self, subject: String, description: Option<String>) -> Result<TaskRecord> {
+        let mut index = self.index.read().unwrap_or_default();
+        let task = TaskRecord::new(index.next_id, subject, description);
+        self.tasks.write(&task_key(task.id), &task)?;
+        index.next_id += 1;
+        self.index.write(&index)?;
+        Ok(task)
     }
 
-    fn render_json(&self, task: &TaskRecord) -> Result<String> {
-        serde_json::to_string_pretty(task).context("failed to serialize task")
+    pub fn get(&self, task_id: u64) -> Result<TaskRecord> {
+        self.tasks
+            .read(&task_key(task_id))
+            .with_context(|| format!("Task {} not found", task_id))
     }
 
-    fn clear_dependency(&self, completed_id: u64) -> Result<()> {
-        for mut task in self.load_all()? {
-            if task.blocked_by.contains(&completed_id) {
-                task.blocked_by.retain(|id| *id != completed_id);
-                self.save(&task)?;
-            }
-        }
-        Ok(())
-    }
-
-    fn save(&self, task: &TaskRecord) -> Result<()> {
-        let path = self.task_path(task.id);
-        let content = serde_json::to_string_pretty(task)?;
-        fs::write(&path, content)
-            .with_context(|| format!("failed to write task file {}", path.display()))?;
-        Ok(())
-    }
-
-    pub fn create(&mut self, subject: String, description: Option<String>) -> Result<String> {
-        let task = TaskRecord::new(self.next_id, subject, description);
-        self.save(&task)?;
-        self.render_json(&task)
-    }
-
-    pub fn get(&self, task_id: u64) -> Result<String> {
-        let task = self.load(task_id)?;
-        self.render_json(&task)
-    }
-
-    pub fn update(&mut self, task_id: u64, update: TaskUpdate) -> Result<String> {
-        let mut task = self.load(task_id)?;
+    pub fn update(&mut self, task_id: u64, update: TaskUpdate) -> Result<TaskRecord> {
+        let mut task = self.get(task_id)?;
 
         if let Some(owner) = update.owner {
             task.owner = owner;
@@ -169,94 +134,49 @@ impl TaskManager {
         }
 
         if !update.add_blocked_by.is_empty() {
-            Self::merge_unique(&mut task.blocked_by, update.add_blocked_by);
+            merge_unique(&mut task.blocked_by, update.add_blocked_by);
         }
 
         if !update.add_blocks.is_empty() {
-            Self::merge_unique(&mut task.blocks, update.add_blocks.clone());
+            merge_unique(&mut task.blocks, update.add_blocks.clone());
             for blocked_id in update.add_blocks {
-                if let Ok(mut blocked) = self.load(blocked_id)
+                if let Ok(mut blocked) = self.get(blocked_id)
                     && !blocked.blocked_by.contains(&task_id)
                 {
                     blocked.blocked_by.push(task_id);
                     blocked.blocked_by.sort_unstable();
-                    self.save(&blocked)?;
+                    self.tasks.write(&task_key(blocked.id), &blocked)?;
                 }
             }
         }
 
         task.blocked_by.sort_unstable();
         task.blocks.sort_unstable();
-        self.save(&task)?;
-        self.render_json(&task)
+        self.tasks.write(&task_key(task.id), &task)?;
+        Ok(task)
     }
 
-    fn merge_unique(target: &mut Vec<u64>, mut additions: Vec<u64>) {
-        target.append(&mut additions);
-        target.sort_unstable();
-        target.dedup();
-    }
-
-    pub fn list_all(&self) -> Result<String> {
-        let mut tasks = self.load_all()?;
-        if tasks.is_empty() {
-            return Ok("No tasks".into());
-        }
-
+    pub fn list(&self) -> Result<Vec<TaskRecord>> {
+        let mut tasks = self.tasks.list()?;
         tasks.sort_by_key(|task| task.id);
-        let lines = tasks
-            .into_iter()
-            .map(|task| {
-                let blocked = if task.blocked_by.is_empty() {
-                    String::new()
-                } else {
-                    format!(" (blocked by: {:?})", task.blocked_by)
-                };
-
-                let owner = if task.owner.is_empty() {
-                    String::new()
-                } else {
-                    format!(" owner={}", task.owner)
-                };
-
-                format!(
-                    "{} #{}: {}{}{}",
-                    task.status.marker(),
-                    task.id,
-                    task.subject,
-                    owner,
-                    blocked
-                )
-            })
-            .collect::<Vec<_>>();
-
-        Ok(lines.join("\n"))
+        Ok(tasks)
     }
 
-    fn max_task_id(dir: &Path) -> Result<u64> {
-        let mut max_id = 0;
-        for entry in fs::read_dir(dir)
-            .with_context(|| format!("failed to read task directory {}", dir.display()))?
-        {
-            let entry = entry?;
-            let path = entry.path();
-            let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
-                continue;
-            };
+    pub fn delete(&mut self, task_id: u64) -> Result<TaskRecord> {
+        let mut task = self.get(task_id)?;
+        task.status = TaskStatus::Deleted;
+        self.tasks.write(&task_key(task.id), &task)?;
+        Ok(task)
+    }
 
-            let Some(id_text) = name
-                .strip_prefix("task_")
-                .and_then(|value| value.strip_suffix(".json"))
-            else {
-                continue;
-            };
-
-            let Ok(id) = id_text.parse::<u64>() else {
-                continue;
-            };
-            max_id = max_id.max(id);
+    fn clear_dependency(&self, completed_id: u64) -> Result<()> {
+        for mut task in self.list()? {
+            if task.blocked_by.contains(&completed_id) {
+                task.blocked_by.retain(|id| *id != completed_id);
+                self.tasks.write(&task_key(task.id), &task)?;
+            }
         }
-        Ok(max_id)
+        Ok(())
     }
 }
 
@@ -266,10 +186,30 @@ pub struct SharedTaskManager {
 }
 
 impl SharedTaskManager {
-    pub fn new(tasks_dir: impl AsRef<Path>) -> Result<Self> {
-        Ok(Self {
-            inner: Arc::new(Mutex::new(TaskManager::new(tasks_dir)?)),
-        })
+    pub fn new(manager: TaskManager) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(manager)),
+        }
+    }
+
+    pub fn create(&self, subject: String, description: Option<String>) -> Result<TaskRecord> {
+        self.with_manager(|manager| manager.create(subject, description))
+    }
+
+    pub fn get(&self, task_id: u64) -> Result<TaskRecord> {
+        self.with_manager(|manager| manager.get(task_id))
+    }
+
+    pub fn update(&self, task_id: u64, update: TaskUpdate) -> Result<TaskRecord> {
+        self.with_manager(|manager| manager.update(task_id, update))
+    }
+
+    pub fn list(&self) -> Result<Vec<TaskRecord>> {
+        self.with_manager(|manager| manager.list())
+    }
+
+    pub fn delete(&self, task_id: u64) -> Result<TaskRecord> {
+        self.with_manager(|manager| manager.delete(task_id))
     }
 
     fn with_manager<T>(&self, callback: impl FnOnce(&mut TaskManager) -> Result<T>) -> Result<T> {
@@ -279,20 +219,57 @@ impl SharedTaskManager {
             .map_err(|_| anyhow::anyhow!("task manager lock poisoned"))?;
         callback(&mut manager)
     }
+}
 
-    pub fn create(&mut self, subject: String, description: Option<String>) -> Result<String> {
-        self.with_manager(|manager| manager.create(subject, description))
+impl std::ops::Deref for SharedTaskManager {
+    type Target = Arc<Mutex<TaskManager>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+pub fn render_task_json(task: &TaskRecord) -> Result<String> {
+    serde_json::to_string_pretty(task).context("failed to serialize task")
+}
+
+pub fn render_task_list(tasks: Vec<TaskRecord>) -> String {
+    if tasks.is_empty() {
+        return "No tasks.".to_string();
     }
 
-    pub fn get(&self, task_id: u64) -> Result<String> {
-        self.with_manager(|manager| manager.get(task_id))
-    }
+    tasks
+        .into_iter()
+        .map(|task| {
+            let blocked = if task.blocked_by.is_empty() {
+                String::new()
+            } else {
+                format!(" (blocked by: {:?})", task.blocked_by)
+            };
+            let owner = if task.owner.is_empty() {
+                String::new()
+            } else {
+                format!(" owner={}", task.owner)
+            };
+            format!(
+                "{} #{}: {}{}{}",
+                task.status.marker(),
+                task.id,
+                task.subject,
+                owner,
+                blocked
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
 
-    pub fn list_all(&self) -> Result<String> {
-        self.with_manager(|manager| manager.list_all())
-    }
+fn task_key(task_id: u64) -> String {
+    format!("task_{task_id}")
+}
 
-    pub fn update(&mut self, task_id: u64, update: TaskUpdate) -> Result<String> {
-        self.with_manager(|manager| manager.update(task_id, update))
-    }
+fn merge_unique(target: &mut Vec<u64>, mut additions: Vec<u64>) {
+    target.append(&mut additions);
+    target.sort_unstable();
+    target.dedup();
 }

@@ -1,6 +1,6 @@
-use std::{collections::HashMap, fs, path::PathBuf};
+use std::{collections::HashMap, path::PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context as _, Result};
 use serde::Deserialize;
 use walkdir::WalkDir;
 
@@ -19,10 +19,18 @@ impl std::fmt::Display for SkillDocument {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            r#"<skill name="{}">{}</skill>"#,
+            r#"<skill name="{}">
+{}
+</skill>"#,
             self.manifest.name, self.body
         )
     }
+}
+
+pub fn get_skill_registry(skills_dir: PathBuf) -> Result<SkillRegistry> {
+    let mut registry = SkillRegistry::new(skills_dir);
+    registry.load_skills()?;
+    Ok(registry)
 }
 
 pub struct SkillRegistry {
@@ -40,6 +48,7 @@ impl SkillRegistry {
 
     pub fn load_skills(&mut self) -> Result<()> {
         self.skills.clear();
+
         if !self.skills_dir.exists() {
             return Ok(());
         }
@@ -51,7 +60,8 @@ impl SkillRegistry {
             .filter(|entry| entry.file_name().to_str() == Some("SKILL.md"))
         {
             let path = entry.path();
-            let content = fs::read_to_string(path)
+
+            let content = std::fs::read_to_string(path)
                 .with_context(|| format!("can't read skill file: {}", path.display()))?;
 
             let (meta, body) = parse_frontmatter(&content);
@@ -62,7 +72,9 @@ impl SkillRegistry {
                 .unwrap_or("unknown")
                 .to_string();
             let name = meta.name.unwrap_or(fallback_name);
-            let description = meta.description.unwrap_or_else(|| "No description".into());
+            let description = meta
+                .description
+                .unwrap_or_else(|| "No description".to_string());
 
             let document = SkillDocument {
                 manifest: SkillManifest {
@@ -75,16 +87,18 @@ impl SkillRegistry {
 
             self.skills.insert(name, document);
         }
+
         Ok(())
     }
 
     pub fn describe_available(&self) -> String {
         if self.skills.is_empty() {
-            return "(no skills available)".into();
+            return "(no skills available)".to_string();
         }
 
         let mut names = self.skills.keys().cloned().collect::<Vec<_>>();
         names.sort();
+
         names
             .into_iter()
             .filter_map(|name| {
@@ -116,12 +130,6 @@ impl SkillRegistry {
     }
 }
 
-pub fn get_skill_registry(skills_dir: PathBuf) -> Result<SkillRegistry> {
-    let mut registry = SkillRegistry::new(skills_dir);
-    registry.load_skills()?;
-    Ok(registry)
-}
-
 #[derive(Debug, Default, Deserialize)]
 struct SkillFrontmatter {
     name: Option<String>,
@@ -130,13 +138,17 @@ struct SkillFrontmatter {
 
 fn parse_frontmatter(text: &str) -> (SkillFrontmatter, String) {
     let text = text.replace("\r\n", "\n");
+
     let Some(rest) = text.strip_prefix("---\n") else {
         return (SkillFrontmatter::default(), text.trim().to_string());
     };
+
     let Some((frontmatter, body)) = rest.split_once("\n---\n") else {
         return (SkillFrontmatter::default(), text.trim().to_string());
     };
+
     let meta = serde_yaml::from_str::<SkillFrontmatter>(frontmatter).unwrap_or_default();
+
     (meta, body.trim().to_string())
 }
 

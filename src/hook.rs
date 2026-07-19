@@ -1,6 +1,5 @@
-use std::pin::Pin;
-
 use anyhow::Result;
+use std::pin::Pin;
 
 use crate::LoopState;
 
@@ -33,7 +32,7 @@ pub trait SessionStartFn:
 pub trait PreToolUseFn:
     for<'a> Fn(
         &'a LoopState,
-        &mut ToolUse,
+        &'a mut ToolUse,
     ) -> Pin<Box<dyn Future<Output = Result<HookControl>> + Send + 'a>>
     + Send
     + Sync
@@ -43,7 +42,7 @@ pub trait PreToolUseFn:
 pub trait PostToolUseFn:
     for<'tool> Fn(
         &'tool LoopState,
-        &ToolUse,
+        &'tool ToolUse,
         &'tool mut ToolResult,
     ) -> Pin<Box<dyn Future<Output = Result<HookControl>> + Send + 'tool>>
     + Send
@@ -61,7 +60,7 @@ impl<F> SessionStartFn for F where
 impl<F> PreToolUseFn for F where
     F: for<'tool> Fn(
             &'tool LoopState,
-            &mut ToolUse,
+            &'tool mut ToolUse,
         ) -> Pin<Box<dyn Future<Output = Result<HookControl>> + Send + 'tool>>
         + Send
         + Sync
@@ -71,7 +70,7 @@ impl<F> PreToolUseFn for F where
 impl<F> PostToolUseFn for F where
     F: for<'tool> Fn(
             &'tool LoopState,
-            &ToolUse,
+            &'tool ToolUse,
             &'tool mut ToolResult,
         ) -> Pin<Box<dyn Future<Output = Result<HookControl>> + Send + 'tool>>
         + Send
@@ -79,15 +78,11 @@ impl<F> PostToolUseFn for F where
 {
 }
 
-/// Wrapper around the different types of hooks
 #[derive(strum_macros::EnumDiscriminants, strum_macros::Display)]
 #[strum_discriminants(name(HookTypes), derive(strum_macros::Display))]
 pub enum Hook {
-    /// Runs only once for the agent when it starts
     SessionStart(Box<dyn SessionStartFn>),
-    /// Runs before every tool call, yielding a reference to the tool call
     PreToolUse(Box<dyn PreToolUseFn>),
-    /// Runs after every tool call, yielding a reference to the tool call and a mutable result
     PostToolUse(Box<dyn PostToolUseFn>),
 }
 

@@ -1,36 +1,24 @@
-use std::borrow::Cow;
-
 use anyhow::Result;
-use async_trait::async_trait;
-use serde_json::Value;
+use schemars::JsonSchema;
+use serde::Deserialize;
+use tool_macros::tool;
 
-use crate::{ToolSpec, tool::Tool};
+use crate::tool::ToolContext;
 
-pub struct CompactTool;
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CompactInput {
+    #[schemars(description = "Optional focus to preserve in the compacted summary.")]
+    pub focus: Option<String>,
+}
 
-#[async_trait]
-impl Tool for CompactTool {
-    fn name(&self) -> Cow<'_, str> {
-        "compact".into()
-    }
-
-    fn tool_spec(&self) -> ToolSpec {
-        ToolSpec {
-            name: "compact".to_string(),
-            description: Some(
-                "Summarize earlier conversation so work can continue in a smaller context."
-                    .to_string(),
-            ),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "focus": {"type": "string"},
-                },
-            }),
-        }
-    }
-
-    async fn invoke(&mut self, _input: &Value) -> Result<String> {
-        Ok("Compacting conversation...".into())
-    }
+#[tool(
+    name = "compact",
+    description = "Summarize earlier conversation so work can continue in a smaller context."
+)]
+pub async fn compact(_ctx: ToolContext, input: CompactInput) -> Result<String> {
+    let focus = input
+        .focus
+        .map(|focus| format!(" Focus to preserve: {focus}"))
+        .unwrap_or_default();
+    Ok(format!("Compacting conversation...{focus}"))
 }

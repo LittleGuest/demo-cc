@@ -1,75 +1,40 @@
-use std::borrow::Cow;
-
-use anyhow::{Context, Result};
-use async_trait::async_trait;
-use serde_json::Value;
+use crate::tool::{ToolContext, safe_path};
+use anyhow::Result;
+use tool_macros::tool;
+use schemars::JsonSchema;
+use serde::Deserialize;
 use tokio::fs;
 
-use crate::{
-    ToolSpec,
-    tool::{Tool, safe_path},
-};
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct EditFileInput {
+    #[schemars(description = "Path to the file to edit, relative to the current workspace.")]
+    pub path: String,
+    #[schemars(description = "Exact text to find in the file. Only the first match is replaced.")]
+    pub old_text: String,
+    #[schemars(description = "Replacement text for the matched old_text.")]
+    pub new_text: String,
+}
 
-pub struct EditFileTool;
+#[tool(name = "edit_file", description = "Replace exact text in file.")]
+pub async fn edit_file(ctx: ToolContext, input: EditFileInput) -> Result<String> {
+    let path = safe_path(&ctx.work_dir, &input.path)?;
 
-#[async_trait]
-impl Tool for EditFileTool {
-    fn name(&self) -> Cow<'_, str> {
-        "edit_file".into()
+    let content = fs::read_to_string(&path)
+        .await
+        .map_err(|e| anyhow::anyhow!("Error: {}", e))?;
+
+    if !content.contains(&input.old_text) {
+        return Err(anyhow::anyhow!(
+            "Error: Text not found in {}",
+            path.display()
+        ));
     }
 
-    fn tool_spec(&self) -> ToolSpec {
-        ToolSpec {
-            name: "edit_file".to_string(),
-            description: Some("Replace exact text in file.".to_string()),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string" },
-                    "old_text": { "type": "string" },
-                    "new_text": { "type": "string" }
-                },
-                "required": ["path", "old_text", "new_text"]
-            }),
-        }
-    }
+    let updated = content.replacen(&input.old_text, &input.new_text, 1);
 
-    async fn invoke(&mut self, input: &Value) -> Result<String> {
-        let path = input
-            .get("path")
-            .and_then(|v| v.as_str())
-            .context("Invalid path")?;
-        // 编辑操作和读写操作一样，只允许作用在当前工作区内。
-        let path = safe_path(path)?;
+    fs::write(&path, updated)
+        .await
+        .map_err(|e| anyhow::anyhow!("Error: {}", e))?;
 
-        let old_text = input
-            .get("old_text")
-            .and_then(|v| v.as_str())
-            .context("Invalid old_text")?;
-
-        let new_text = input
-            .get("new_text")
-            .and_then(|v| v.as_str())
-            .context("Invalid new_text")?;
-
-        let content = fs::read_to_string(&path)
-            .await
-            .map_err(|e| anyhow::anyhow!("Error: {}", e))?;
-
-        if !content.contains(old_text) {
-            return Err(anyhow::anyhow!(
-                "Error: Text not found in {}",
-                path.display()
-            ));
-        }
-
-        // 只替换第一处匹配，避免一次工具调用意外修改多个位置。
-        let updated = content.replacen(old_text, new_text, 1);
-
-        fs::write(&path, updated)
-            .await
-            .map_err(|e| anyhow::anyhow!("Error: {}", e))?;
-
-        Ok(format!("Edited {}", path.display()))
-    }
+    Ok(format!("Edited {}", path.display()))
 }

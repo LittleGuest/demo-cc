@@ -1,153 +1,317 @@
 use std::{
-    borrow::Cow,
     collections::HashMap,
-    env,
-    path::PathBuf,
-    sync::{Arc, Mutex},
+    path::{Path, PathBuf},
+    sync::Arc,
 };
 
-use anyhow::Result;
+use anyhow::{Context as AnyhowContext, Result};
 use async_trait::async_trait;
+use schemars::JsonSchema;
 use serde_json::Value;
 
 use crate::{
-    ToolSpec,
-    backgroud::SharedBackgroundManager,
-    memory::MemoryManager,
-    skill::SkillRegistry,
-    task::SharedTaskManager,
-    tool::{
-        bash::BashTool, check_background::CheckBackgroundTool, edit_file::EditFileTool,
-        load_skill::LoadSkillTool, memory::SaveMemoryTool, read_file::ReadFileTool,
-        run_background::RunBackgroundTool, sub_agent::SubAgentTool, task_create::TaskCreateTool,
-        todo::TodoManagerTool, write_file::WriteFileTool,
-    },
+    ToolSpec, background::SharedBackgroundManager, cron::SharedCronScheduler,
+    memory::MemoryManager, skill::SkillRegistry, task::SharedTaskManager,
+    team::SharedTeammateManager, worktree::SharedWorktreeManager,
 };
 
-pub mod bash;
-pub mod check_background;
-pub mod compact;
-pub mod edit_file;
-pub mod load_skill;
-pub mod memory;
-pub mod read_file;
-pub mod run_background;
-pub mod sub_agent;
-pub mod task_create;
-pub mod task_get;
-pub mod task_list;
-pub mod task_update;
-pub mod todo;
-pub mod write_file;
+mod background;
+mod bash;
+mod compact;
+mod cron;
+mod edit_file;
+mod load_skill;
+mod math;
+mod memory;
+mod read_file;
+mod subagent;
+mod task;
+mod team;
+mod worktree;
+mod write_file;
 
-pub type Tools = HashMap<String, Box<dyn Tool>>;
+use background::{BackgroundRunTool, CheckBackgroundTool};
+use bash::BashTool;
+use compact::CompactTool;
+use cron::{CronCreateTool, CronDeleteTool, CronListTool};
+use edit_file::EditFileTool;
+use load_skill::LoadSkillTool;
+use math::AddTool;
+use memory::SaveMemoryTool;
+use read_file::ReadFileTool;
+use subagent::TaskTool;
+use task::{TaskCreateTool, TaskGetTool, TaskListTool, TaskUpdateTool};
+use team::{
+    BroadcastTool, ListTeammatesTool, PlanApprovalTool, ReadInboxTool, SendMessageTool,
+    ShutdownRequestTool, ShutdownResponseTool, SpawnTeammateTool,
+};
+use worktree::{
+    WorktreeCreateTool, WorktreeEventsTool, WorktreeListTool, WorktreeRunTool, WorktreeStatusTool,
+};
+use write_file::WriteFileTool;
+
+#[derive(Clone)]
+pub struct ToolContext {
+    pub skill_registry: Arc<SkillRegistry>,
+    pub memory_manager: Arc<std::sync::Mutex<MemoryManager>>,
+    pub work_dir: PathBuf,
+    pub task_manager: SharedTaskManager,
+    pub background_manager: SharedBackgroundManager,
+    pub cron_scheduler: SharedCronScheduler,
+    pub teammate_manager: SharedTeammateManager,
+    pub worktree_manager: SharedWorktreeManager,
+}
+
+pub fn toolset() -> ToolRouter {
+    ToolRouter::new()
+        .route(AddTool)
+        .route(BashTool)
+        .route(BackgroundRunTool)
+        .route(CheckBackgroundTool)
+        .route(CronCreateTool)
+        .route(CronDeleteTool)
+        .route(CronListTool)
+        .route(ReadFileTool)
+        .route(WriteFileTool)
+        .route(EditFileTool)
+        .route(LoadSkillTool)
+        .route(SaveMemoryTool)
+        .route(CompactTool)
+        .route(TaskTool)
+        .route(TaskCreateTool)
+        .route(TaskGetTool)
+        .route(TaskListTool)
+        .route(TaskUpdateTool)
+        .route(SpawnTeammateTool)
+        .route(ListTeammatesTool)
+        .route(SendMessageTool)
+        .route(BroadcastTool)
+        .route(ReadInboxTool)
+        .route(PlanApprovalTool)
+        .route(ShutdownRequestTool)
+        .route(ShutdownResponseTool)
+        .route(WorktreeCreateTool)
+        .route(WorktreeListTool)
+        .route(WorktreeStatusTool)
+        .route(WorktreeRunTool)
+        .route(WorktreeEventsTool)
+}
+
+pub fn subagent_toolset() -> ToolRouter {
+    ToolRouter::new()
+        .route(BashTool)
+        .route(ReadFileTool)
+        .route(WriteFileTool)
+        .route(EditFileTool)
+}
 
 #[async_trait]
 pub trait Tool: Send + Sync {
-    // name 必须和暴露给 LLM 的 tool_spec.name 保持一致。
-    fn name(&self) -> Cow<'_, str>;
-    // tool_spec 会随每次 LLM 请求发送，告诉模型该工具如何被调用。
-    fn tool_spec(&self) -> ToolSpec;
-    // invoke 接收模型生成的 JSON 参数，返回可写入 ToolResult 的纯文本结果。
-    async fn invoke(&mut self, input: &Value) -> Result<String>;
+    fn name(&self) -> &'static str;
+    fn description(&self) -> &'static str;
+    fn input_schema(&self) -> Value;
+
+    async fn call(&self, context: ToolContext, input: Value) -> Result<String>;
+
+    fn tool_spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: self.name().to_string(),
+            description: Some(self.description().to_string()),
+            input_schema: self.input_schema(),
+        }
+    }
 }
 
-pub fn agent_tools(
-    registry: Arc<SkillRegistry>,
-    memory_manager: Arc<Mutex<MemoryManager>>,
-    task_manager: SharedTaskManager,
-    bg_manager: SharedBackgroundManager,
-) -> Tools {
-    HashMap::from([
-        ("bash".into(), Box::new(BashTool) as Box<dyn Tool>),
-        ("edit_file".into(), Box::new(EditFileTool) as Box<dyn Tool>),
-        ("read_file".into(), Box::new(ReadFileTool) as Box<dyn Tool>),
-        (
-            "write_file".into(),
-            Box::new(WriteFileTool) as Box<dyn Tool>,
-        ),
-        (
-            "load_skill".into(),
-            Box::new(LoadSkillTool::new(registry.clone())) as Box<dyn Tool>,
-        ),
-        (
-            "save_memory".into(),
-            Box::new(SaveMemoryTool::new(memory_manager.clone())) as Box<dyn Tool>,
-        ),
-        (
-            "task".into(),
-            Box::new(SubAgentTool::new(
-                registry.clone(),
-                memory_manager.clone(),
-                bg_manager.clone(),
-            )) as Box<dyn Tool>,
-        ),
-        (
-            "todo".into(),
-            Box::new(TodoManagerTool::new()) as Box<dyn Tool>,
-        ),
-        (
-            "task_create".into(),
-            Box::new(TaskCreateTool::new(task_manager)) as Box<dyn Tool>,
-        ),
-        (
-            "run_background".into(),
-            Box::new(RunBackgroundTool::new(bg_manager.clone())) as Box<dyn Tool>,
-        ),
-        (
-            "check_background".into(),
-            Box::new(CheckBackgroundTool::new(bg_manager)) as Box<dyn Tool>,
-        ),
-    ])
+pub struct ToolRouter {
+    tools: HashMap<String, Box<dyn Tool>>,
 }
 
-pub fn subagent_tools(registry: Arc<SkillRegistry>) -> Tools {
-    HashMap::from([
-        ("bash".into(), Box::new(BashTool) as Box<dyn Tool>),
-        ("edit_file".into(), Box::new(EditFileTool) as Box<dyn Tool>),
-        ("read_file".into(), Box::new(ReadFileTool) as Box<dyn Tool>),
-        (
-            "write_file".into(),
-            Box::new(WriteFileTool) as Box<dyn Tool>,
-        ),
-        (
-            "load_skill".into(),
-            Box::new(LoadSkillTool::new(registry)) as Box<dyn Tool>,
-        ),
-    ])
+impl ToolRouter {
+    pub fn new() -> Self {
+        Self {
+            tools: HashMap::new(),
+        }
+    }
+
+    pub fn route<T>(mut self, tool: T) -> Self
+    where
+        T: Tool + 'static,
+    {
+        self.tools.insert(tool.name().to_string(), Box::new(tool));
+        self
+    }
+
+    pub fn tool_specs(&self) -> Vec<ToolSpec> {
+        self.tools.values().map(|tool| tool.tool_spec()).collect()
+    }
+
+    pub async fn call(&self, context: &ToolContext, name: &str, input: Value) -> Result<String> {
+        let tool = self
+            .tools
+            .get(name)
+            .ok_or_else(|| anyhow::anyhow!("unknown tool: {name}"))?;
+
+        tool.call(context.clone(), input).await
+    }
 }
 
-fn safe_path(path: &str) -> Result<PathBuf> {
-    // 文件工具只能访问当前工作区内的真实路径，避免模型读写工作区之外的文件。
-    let cwd = env::current_dir()?;
-    let full = cwd.join(path).canonicalize()?;
-    if !full.starts_with(&cwd) {
+impl Default for ToolRouter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub fn input_schema<T>() -> Value
+where
+    T: JsonSchema,
+{
+    serde_json::to_value(schemars::schema_for!(T)).expect("schema generation should not fail")
+}
+
+fn safe_path(work_dir: &Path, path: &str) -> Result<PathBuf> {
+    resolve_safe_path(work_dir, path, false)
+}
+
+fn safe_path_allow_missing(work_dir: &Path, path: &str) -> Result<PathBuf> {
+    resolve_safe_path(work_dir, path, true)
+}
+
+fn resolve_safe_path(work_dir: &Path, path: &str, allow_missing: bool) -> Result<PathBuf> {
+    let work_dir = work_dir.canonicalize()?;
+    let candidate = work_dir.join(path);
+
+    let full = if candidate.exists() || !allow_missing {
+        candidate.canonicalize()?
+    } else {
+        let parent = candidate
+            .parent()
+            .context("Path has no parent")?
+            .canonicalize()?;
+
+        if !parent.starts_with(&work_dir) {
+            return Err(anyhow::anyhow!("Path escapes workspace"));
+        }
+
+        let file_name = candidate.file_name().context("Path has no file name")?;
+
+        parent.join(file_name)
+    };
+
+    if !full.starts_with(&work_dir) {
         return Err(anyhow::anyhow!("Path escapes workspace"));
     }
+
     Ok(full)
 }
 
-/// 与 safe_path 类似，但不要求路径已存在。
-/// 用于 write_file 等需要创建新文件的工具：只做路径穿越检查，不调用 canonicalize。
-fn safe_path_for_write(path: &str) -> Result<PathBuf> {
-    let cwd = env::current_dir()?.canonicalize()?;
-    let full = cwd.join(path);
-    // 将 .. 等相对组件解析后与 cwd 比较，防止路径穿越。
-    let mut components = Vec::new();
-    for comp in full.components() {
-        match comp {
-            std::path::Component::ParentDir => {
-                if components.pop().is_none() {
-                    return Err(anyhow::anyhow!("Path escapes workspace"));
-                }
-            }
-            std::path::Component::CurDir => {}
-            other => components.push(other),
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        background::SharedBackgroundManager,
+        cron::{CronScheduler, SharedCronScheduler},
+        memory::MemoryManager,
+        store::StoreRoot,
+        task::{SharedTaskManager, TaskManager},
+        team::{SharedTeammateManager, TeammateManager},
+        worktree::{SharedWorktreeManager, WorktreeManager},
+    };
+
+    #[derive(serde::Deserialize, JsonSchema)]
+    struct EchoInput {
+        #[schemars(description = "Text to echo.")]
+        text: String,
+    }
+
+    struct EchoTool;
+
+    #[async_trait]
+    impl Tool for EchoTool {
+        fn name(&self) -> &'static str {
+            "echo"
+        }
+
+        fn description(&self) -> &'static str {
+            "Echo text with a prefix."
+        }
+
+        fn input_schema(&self) -> Value {
+            input_schema::<EchoInput>()
+        }
+
+        async fn call(&self, context: ToolContext, input: Value) -> Result<String> {
+            let input: EchoInput = serde_json::from_value(input)?;
+            Ok(format!("{}:{}", context.work_dir.display(), input.text))
         }
     }
-    let resolved: PathBuf = components.iter().collect();
-    if !resolved.starts_with(&cwd) {
-        return Err(anyhow::anyhow!("Path escapes workspace"));
+
+    #[tokio::test]
+    async fn router_dispatches_by_tool_name() {
+        let router = ToolRouter::new().route(EchoTool);
+        let context = test_context("router_dispatches_by_tool_name");
+
+        let output = router
+            .call(&context, "echo", serde_json::json!({ "text": "tool" }))
+            .await
+            .unwrap();
+
+        assert!(output.ends_with(":tool"));
+        assert!(output.contains("sfull-tool-test-router_dispatches_by_tool_name"));
     }
-    Ok(resolved)
+
+    #[test]
+    fn schema_is_generated_from_input_type() {
+        let spec = EchoTool.tool_spec();
+        let schema = spec.input_schema;
+
+        assert_eq!(schema["title"], "EchoInput");
+        assert_eq!(schema["properties"]["text"]["type"], "string");
+        assert_eq!(schema["properties"]["text"]["description"], "Text to echo.");
+        assert_eq!(schema["required"][0], "text");
+    }
+
+    #[tokio::test]
+    async fn proc_macro_supports_plain_function_tools() {
+        let router = ToolRouter::new().route(AddTool);
+        let context = test_context("proc_macro_supports_plain_function_tools");
+
+        let output = router
+            .call(&context, "add", serde_json::json!({ "a": 2, "b": 3 }))
+            .await
+            .unwrap();
+
+        assert_eq!(output, "5");
+
+        let schema = AddTool.tool_spec().input_schema;
+        assert_eq!(schema["properties"]["a"]["type"], "integer");
+        assert_eq!(
+            schema["properties"]["a"]["description"],
+            "Left integer operand."
+        );
+        assert_eq!(schema["properties"]["b"]["type"], "integer");
+    }
+
+    fn test_context(name: &str) -> ToolContext {
+        let root_dir = std::env::temp_dir().join(format!("sfull-tool-test-{name}"));
+        let _ = std::fs::remove_dir_all(&root_dir);
+        std::fs::create_dir_all(&root_dir).unwrap();
+        let store_root = StoreRoot::new(root_dir.join(".claude")).unwrap();
+
+        ToolContext {
+            skill_registry: Arc::new(SkillRegistry::new(root_dir.join("skills"))),
+            memory_manager: Arc::new(std::sync::Mutex::new(MemoryManager::new(
+                root_dir.join(".claude/memory"),
+            ))),
+            work_dir: root_dir.clone(),
+            task_manager: SharedTaskManager::new(TaskManager::new(&store_root).unwrap()),
+            background_manager: SharedBackgroundManager::new(&store_root).unwrap(),
+            cron_scheduler: SharedCronScheduler::new(CronScheduler::new(&store_root).unwrap()),
+            teammate_manager: SharedTeammateManager::new(
+                TeammateManager::new(&store_root).unwrap(),
+            ),
+            worktree_manager: SharedWorktreeManager::new(
+                WorktreeManager::new(&store_root, root_dir).unwrap(),
+            ),
+        }
+    }
 }

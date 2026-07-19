@@ -1,37 +1,29 @@
-use std::{
-    env,
-    sync::{Arc, Mutex},
-};
+use std::sync::Arc;
 
-use anthropic_ai_sdk::types::message::{Message, Role};
+use anthropic_ai_sdk::types::message::{Message, Role::User};
 use anyhow::Context;
 use demo_cc::{
-    LoopState,
-    backgroud::SharedBackgroundManager,
-    get_llm_client,
-    hook::HookControl,
-    invoke_hooks,
-    memory::MemoryManager,
+    Agent, AgentSystemPrompt,
+    background::SharedBackgroundManager,
+    cron::{CronScheduler, SharedCronScheduler},
+    extract_text, get_llm_client,
+    mcp::load_mcp_router,
+    memory::get_memory_manager,
     permission::{PermissionManager, PermissionMode},
     skill::get_skill_registry,
-    task::SharedTaskManager,
-    tool::agent_tools,
+    store::StoreRoot,
+    task::{SharedTaskManager, TaskManager},
+    team::{SharedTeammateManager, TeammateManager},
+    tool::{ToolContext, toolset},
+    worktree::{SharedWorktreeManager, WorktreeManager},
 };
 use inquire::{Select, Text};
-use tracing::Level;
-use tracing_subscriber::FmtSubscriber;
 
 const SKILLS_DIR: &str = "skills";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    dotenvy::dotenv().ok();
-
-    // 工具执行过程使用 tracing 记录调试信息，最终回复仍直接打印到终端。
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::TRACE)
-        .finish();
-    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+    let client = get_llm_client()?;
 
     let mode = Select::new(
         "Permission mode:",
@@ -43,100 +35,64 @@ async fn main() -> anyhow::Result<()> {
     )
     .prompt()
     .context("An error happened or user cancelled the input.")?;
-
     let permission_manager = PermissionManager::try_new(mode)?;
     println!("[Permission mode: {}]", permission_manager.mode());
 
-    let client = get_llm_client()?;
-
-    let skills_dir = env::current_dir()?.join(SKILLS_DIR);
+    let skills_dir = std::env::current_dir()?.join(SKILLS_DIR);
     let skill_registry = Arc::new(get_skill_registry(skills_dir)?);
-    let memory_manager = Arc::new(Mutex::new(MemoryManager::init(
-        env::current_dir()?.join(".memory"),
+    let work_dir = std::env::current_dir()?;
+    let store_root = StoreRoot::new(work_dir.join(".claude"))?;
+    let task_manager = SharedTaskManager::new(TaskManager::new(&store_root)?);
+    let background_manager = SharedBackgroundManager::new(&store_root)?;
+    let cron_scheduler = SharedCronScheduler::new(CronScheduler::new(&store_root)?);
+    let teammate_manager = SharedTeammateManager::new(TeammateManager::new(&store_root)?);
+    let worktree_manager =
+        SharedWorktreeManager::new(WorktreeManager::new(&store_root, work_dir.clone())?);
+    let memory_manager = Arc::new(std::sync::Mutex::new(get_memory_manager(
+        work_dir.join(".claude/memory"),
     )?));
-    let task_manager = SharedTaskManager::new(env::current_dir()?.join(".tasks"))?;
-    let bg_manager = SharedBackgroundManager::new(env::current_dir()?.join(".runtime-tasks"))?;
-    let tools = agent_tools(
-        skill_registry.clone(),
-        memory_manager.clone(),
-        task_manager,
-        bg_manager.clone(),
-    );
-    let mut state = LoopState::new(
-        client,
-        tools,
-        usize::MAX,
-        permission_manager,
-        skill_registry.clone(),
-        memory_manager.clone(),
-        bg_manager,
-    );
-    state.session_start(|_| {
-        Box::pin(async {
-            println!("--- Initializing...");
-            Ok(HookControl::Continue)
-        })
-    });
-    state.pre_tool(|_, tool_use| {
-        println!("--- Before tool call: {tool_use:?}");
-        Box::pin(async move { Ok(HookControl::Continue) })
-    });
-    state.post_tool(|_, tool_use, tool_result| {
-        println!("--- After tool call: {tool_use:?}, result: {tool_result:?}");
-        Box::pin(async move { Ok(HookControl::Continue) })
-    });
+    let mcp_router = load_mcp_router().await?;
 
-    if let HookControl::Block(reason) = invoke_hooks!(SessionStart, &state)? {
-        println!("--- Session blocked: {reason}");
-        return Ok(());
-    }
+    let tools = toolset();
+    let tool_context = ToolContext {
+        skill_registry: skill_registry.clone(),
+        memory_manager,
+        work_dir,
+        task_manager,
+        background_manager,
+        cron_scheduler,
+        teammate_manager,
+        worktree_manager,
+    };
+
+    let mut agent = Agent::new(
+        client.clone(),
+        tool_context,
+        tools,
+        mcp_router,
+        permission_manager,
+        AgentSystemPrompt::Dynamic,
+    );
 
     loop {
-        let prompt = Text::new("--- How can I help you? ---\n")
+        let query = Text::new("--- How can I help you?")
             .prompt()
-            .context("An error happend or user cancelled the input.")?;
-        let prompt = prompt.trim();
+            .context("An error happened or user cancelled the input.")?;
 
-        if prompt.is_empty() {
-            continue;
-        }
-
-        if ".exit".eq(prompt) {
+        //break out of the loop if the user enters exit()
+        if query.trim() == "exit()" {
             break;
         }
+        agent.runtime.context.push(Message::new_text(User, query));
 
-        if ".rules".eq(prompt) {
-            for (index, rule) in state.permission_manager.rules().iter().enumerate() {
-                println!("  {index}: {rule}")
-            }
-            continue;
-        }
+        agent.agent_loop().await?;
 
-        if ".memory".eq(prompt) {
-            let memory_manager = memory_manager
-                .lock()
-                .map_err(|_| anyhow::anyhow!("memory manager lock poisoned"))?;
-            println!("{}", memory_manager.describe_memories());
-            continue;
-        }
-
-        if prompt.trim().starts_with(".mode") {
-            state
-                .handle_mode_command(prompt)
-                .context("failed to switch permission mode")?;
-            continue;
-        }
-
-        state.context.push(Message::new_text(Role::User, prompt));
-
-        state.agent_loop().await?;
-
-        let Some(final_content) = state.context.last() else {
+        let Some(final_content) = agent.runtime.context.last() else {
             continue;
         };
         println!(
-            "################## Final response ##################: \n{}",
-            LoopState::extract_text(&final_content.content)
+            "--- Final response:\n{}",
+            extract_text(&final_content.content)
         );
     }
 

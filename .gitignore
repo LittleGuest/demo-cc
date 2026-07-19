@@ -1,3 +1,4 @@
 /target
+./tool_macros/target
 
 .env

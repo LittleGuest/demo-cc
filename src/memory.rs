@@ -1,6 +1,6 @@
-use std::{collections::HashMap, env, fs, path::PathBuf};
+use std::{collections::HashMap, path::PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context as _, Result};
 use serde::Deserialize;
 use strum::VariantArray;
 use strum_macros::{AsRefStr, Display, EnumString, VariantArray};
@@ -56,13 +56,13 @@ pub struct MemoryManager {
     memories: HashMap<String, MemoryEntry>,
 }
 
-impl MemoryManager {
-    pub fn init(memory_dir: PathBuf) -> Result<Self> {
-        let mut manager = Self::new(memory_dir);
-        manager.load_all()?;
-        Ok(manager)
-    }
+pub fn get_memory_manager(memory_dir: PathBuf) -> Result<MemoryManager> {
+    let mut manager = MemoryManager::new(memory_dir);
+    manager.load_all()?;
+    Ok(manager)
+}
 
+impl MemoryManager {
     pub fn new(memory_dir: PathBuf) -> Self {
         Self {
             memory_dir,
@@ -70,47 +70,23 @@ impl MemoryManager {
         }
     }
 
-    pub fn memories(&self) -> &HashMap<String, MemoryEntry> {
-        &self.memories
-    }
-
-    pub fn describe_memories(&self) -> String {
-        if self.memories.is_empty() {
-            return "  (no memories)".to_string();
-        }
-        self.sorted_memoriees()
-            .into_iter()
-            .map(|entry| {
-                format!(
-                    "  [{}] {}: {}",
-                    entry.memory_type, entry.name, entry.description
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
-    fn sorted_memoriees(&self) -> Vec<&MemoryEntry> {
-        let mut memories = self.memories.values().collect::<Vec<_>>();
-        memories.sort_by(|a, b| a.name.cmp(&b.name));
-        memories
-    }
-
     pub fn load_all(&mut self) -> Result<()> {
         self.memories.clear();
+
         if !self.memory_dir.exists() {
             return Ok(());
         }
+
         for entry in WalkDir::new(&self.memory_dir)
             .max_depth(1)
             .into_iter()
             .filter_map(|entry| entry.ok())
             .filter(|entry| entry.file_type().is_file())
             .filter(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("md"))
-            .filter(|entry| entry.file_name().to_str() == Some(MEMORY_INDEX_FILE))
+            .filter(|entry| entry.file_name().to_str() != Some(MEMORY_INDEX_FILE))
         {
             let path = entry.path();
-            let content = fs::read_to_string(path)
+            let content = std::fs::read_to_string(path)
                 .with_context(|| format!("can't read memory file: {}", path.display()))?;
             let Some(parsed) = parse_frontmatter(&content)? else {
                 continue;
@@ -128,6 +104,7 @@ impl MemoryManager {
                 .as_deref()
                 .unwrap_or("project")
                 .parse::<MemoryType>()?;
+
             self.memories.insert(
                 name.clone(),
                 MemoryEntry {
@@ -138,6 +115,7 @@ impl MemoryManager {
                 },
             );
         }
+
         Ok(())
     }
 
@@ -163,12 +141,13 @@ impl MemoryManager {
                 continue;
             }
 
-            lines.push(format!("## [{memory_type}]"));
+            lines.push(format!("## [{}]", memory_type));
             for entry in typed {
-                lines.push(entry.to_string().trim().into());
+                lines.push(entry.to_string().trim().to_string());
                 lines.push(String::new());
             }
         }
+
         lines.join("\n").trim().to_string()
     }
 
@@ -184,7 +163,7 @@ impl MemoryManager {
             return Err(anyhow::anyhow!("invalid memory name"));
         }
 
-        fs::create_dir_all(&self.memory_dir)
+        std::fs::create_dir_all(&self.memory_dir)
             .with_context(|| format!("can't create memory dir: {}", self.memory_dir.display()))?;
 
         let file_name = format!("{safe_name}.md");
@@ -192,16 +171,16 @@ impl MemoryManager {
         let frontmatter = format!(
             "---\nname: {name}\ndescription: {description}\ntype: {memory_type}\n---\n{content}\n"
         );
-        fs::write(&file_path, frontmatter)
+        std::fs::write(&file_path, frontmatter)
             .with_context(|| format!("can't write memory file: {}", file_path.display()))?;
 
         self.memories.insert(
-            name.into(),
+            name.to_string(),
             MemoryEntry {
-                name: name.into(),
-                description: description.into(),
+                name: name.to_string(),
+                description: description.to_string(),
                 memory_type,
-                content: content.into(),
+                content: content.to_string(),
             },
         );
 
@@ -212,29 +191,57 @@ impl MemoryManager {
             name,
             memory_type,
             file_path
-                .strip_prefix(env::current_dir()?)
+                .strip_prefix(std::env::current_dir()?)
                 .unwrap_or(&file_path)
-                .display(),
+                .display()
         ))
+    }
+
+    pub fn memories(&self) -> &HashMap<String, MemoryEntry> {
+        &self.memories
+    }
+
+    pub fn describe_memories(&self) -> String {
+        if self.memories.is_empty() {
+            return "  (no memories)".to_string();
+        }
+
+        self.sorted_memories()
+            .into_iter()
+            .map(|entry| {
+                format!(
+                    "  [{}] {}: {}",
+                    entry.memory_type, entry.name, entry.description
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     fn rebuild_index(&self) -> Result<()> {
         let mut lines = vec!["# Memory Index".to_string(), String::new()];
-        for entry in self.sorted_memoriees() {
+        for entry in self.sorted_memories() {
             lines.push(format!(
                 "- {}: {} [{}]",
                 entry.name, entry.description, entry.memory_type
             ));
+
             if lines.len() >= MAX_INDEX_LINES {
-                lines.push(format!("... (truncated at {} lines", MAX_INDEX_LINES));
+                lines.push(format!("... (truncated at {} lines)", MAX_INDEX_LINES));
                 break;
             }
         }
 
         let index_path = self.memory_dir.join(MEMORY_INDEX_FILE);
-        fs::write(&index_path, format!("{}\n", lines.join("\n")))
+        std::fs::write(&index_path, format!("{}\n", lines.join("\n")))
             .with_context(|| format!("can't write memory index: {}", index_path.display()))?;
         Ok(())
+    }
+
+    fn sorted_memories(&self) -> Vec<&MemoryEntry> {
+        let mut memories = self.memories.values().collect::<Vec<_>>();
+        memories.sort_by(|a, b| a.name.cmp(&b.name));
+        memories
     }
 }
 
@@ -258,11 +265,13 @@ fn parse_frontmatter(text: &str) -> Result<Option<ParsedMemory>> {
     let Some(rest) = text.strip_prefix("---\n") else {
         return Ok(None);
     };
+
     let Some((frontmatter, body)) = rest.split_once("\n---\n") else {
         return Ok(None);
     };
 
     let meta = serde_yaml::from_str::<MemoryFrontmatter>(frontmatter).unwrap_or_default();
+
     Ok(Some(ParsedMemory {
         name: meta.name,
         description: meta.description,
@@ -274,7 +283,7 @@ fn parse_frontmatter(text: &str) -> Result<Option<ParsedMemory>> {
 fn sanitize_name(name: &str) -> String {
     name.chars()
         .map(|ch| {
-            if ch.is_ascii_alphabetic() || matches!(ch, '_' | '-') {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-') {
                 ch.to_ascii_lowercase()
             } else {
                 '_'
@@ -282,7 +291,7 @@ fn sanitize_name(name: &str) -> String {
         })
         .collect::<String>()
         .trim_matches('_')
-        .into()
+        .to_string()
 }
 
 #[cfg(test)]

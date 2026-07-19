@@ -1,46 +1,20 @@
-use std::{borrow::Cow, sync::Arc};
+use anyhow::Result;
+use schemars::JsonSchema;
+use serde::Deserialize;
 
-use anyhow::{Context, Result};
-use async_trait::async_trait;
-use serde_json::Value;
+use crate::tool::ToolContext;
+use tool_macros::tool;
 
-use crate::{ToolSpec, skill::SkillRegistry, tool::Tool};
-
-pub struct LoadSkillTool {
-    registry: Arc<SkillRegistry>,
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct LoadSkillInput {
+    #[schemars(description = "Name of the skill to load.")]
+    pub name: String,
 }
 
-impl LoadSkillTool {
-    pub fn new(registry: Arc<SkillRegistry>) -> Self {
-        Self { registry }
-    }
-}
-
-#[async_trait]
-impl Tool for LoadSkillTool {
-    fn name(&self) -> Cow<'_, str> {
-        "load_skill".into()
-    }
-
-    fn tool_spec(&self) -> ToolSpec {
-        ToolSpec {
-            name: "load_skill".to_string(),
-            description: Some(
-                "Load the full body of a named skill into the current context.".to_string(),
-            ),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {"name": {"type": "string"}},
-                "required": ["name"],
-            }),
-        }
-    }
-
-    async fn invoke(&mut self, input: &Value) -> Result<String> {
-        let name = input
-            .get("name")
-            .and_then(|v| v.as_str())
-            .context("Invalid name")?;
-        Ok(self.registry.load_full_text(name))
-    }
+#[tool(
+    name = "load_skill",
+    description = "Load the full body of a named skill into the current context."
+)]
+pub async fn load_skill(ctx: ToolContext, input: LoadSkillInput) -> Result<String> {
+    Ok(ctx.skill_registry.load_full_text(&input.name))
 }
