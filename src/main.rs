@@ -6,7 +6,9 @@ use std::{
 use anthropic_ai_sdk::types::message::{Message, Role};
 use anyhow::Context;
 use demo_cc::{
-    LoopState, get_llm_client,
+    LoopState,
+    backgroud::SharedBackgroundManager,
+    get_llm_client,
     hook::HookControl,
     invoke_hooks,
     memory::MemoryManager,
@@ -53,7 +55,13 @@ async fn main() -> anyhow::Result<()> {
         env::current_dir()?.join(".memory"),
     )?));
     let task_manager = SharedTaskManager::new(env::current_dir()?.join(".tasks"))?;
-    let tools = agent_tools(skill_registry.clone(), memory_manager.clone(), task_manager);
+    let bg_manager = SharedBackgroundManager::new(env::current_dir()?.join(".runtime-tasks"))?;
+    let tools = agent_tools(
+        skill_registry.clone(),
+        memory_manager.clone(),
+        task_manager,
+        bg_manager.clone(),
+    );
     let mut state = LoopState::new(
         client,
         tools,
@@ -61,6 +69,7 @@ async fn main() -> anyhow::Result<()> {
         permission_manager,
         skill_registry.clone(),
         memory_manager.clone(),
+        bg_manager,
     );
     state.session_start(|_| {
         Box::pin(async {
@@ -113,7 +122,7 @@ async fn main() -> anyhow::Result<()> {
 
         if prompt.trim().starts_with(".mode") {
             state
-                .handle_mode_command(&prompt)
+                .handle_mode_command(prompt)
                 .context("failed to switch permission mode")?;
             continue;
         }

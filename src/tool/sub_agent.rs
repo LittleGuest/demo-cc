@@ -9,7 +9,9 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::{
-    LoopState, ToolSpec, get_llm_client,
+    LoopState, ToolSpec,
+    backgroud::SharedBackgroundManager,
+    get_llm_client,
     memory::MemoryManager,
     permission::{PermissionManager, PermissionMode},
     skill::SkillRegistry,
@@ -19,13 +21,19 @@ use crate::{
 pub struct SubAgentTool {
     registry: Arc<SkillRegistry>,
     memory_manager: Arc<Mutex<MemoryManager>>,
+    bg_manager: SharedBackgroundManager,
 }
 
 impl SubAgentTool {
-    pub fn new(registry: Arc<SkillRegistry>, memory_manager: Arc<Mutex<MemoryManager>>) -> Self {
+    pub fn new(
+        registry: Arc<SkillRegistry>,
+        memory_manager: Arc<Mutex<MemoryManager>>,
+        bg_manager: SharedBackgroundManager,
+    ) -> Self {
         Self {
             registry,
             memory_manager,
+            bg_manager,
         }
     }
 
@@ -34,6 +42,7 @@ impl SubAgentTool {
         description: Option<&str>,
         registry: Arc<SkillRegistry>,
         memory_manager: Arc<Mutex<MemoryManager>>,
+        bg_manager: SharedBackgroundManager,
     ) -> Result<String> {
         println!("> task - ({}): {}", description.unwrap_or_default(), prompt);
         let client = get_llm_client()?;
@@ -46,6 +55,7 @@ impl SubAgentTool {
             permission_manager,
             registry.clone(),
             memory_manager,
+            bg_manager,
         );
         state.context.push(Message::new_text(Role::User, prompt));
         state.agent_loop().await?;
@@ -93,6 +103,7 @@ impl Tool for SubAgentTool {
             description,
             self.registry.clone(),
             self.memory_manager.clone(),
+            self.bg_manager.clone(),
         )
         .await
     }

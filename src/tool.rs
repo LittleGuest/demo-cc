@@ -12,22 +12,26 @@ use serde_json::Value;
 
 use crate::{
     ToolSpec,
+    backgroud::SharedBackgroundManager,
     memory::MemoryManager,
     skill::SkillRegistry,
     task::SharedTaskManager,
     tool::{
-        bash::BashTool, edit_file::EditFileTool, load_skill::LoadSkillTool, memory::SaveMemoryTool,
-        read_file::ReadFileTool, sub_agent::SubAgentTool, task_create::TaskCreateTool,
+        bash::BashTool, check_background::CheckBackgroundTool, edit_file::EditFileTool,
+        load_skill::LoadSkillTool, memory::SaveMemoryTool, read_file::ReadFileTool,
+        run_background::RunBackgroundTool, sub_agent::SubAgentTool, task_create::TaskCreateTool,
         todo::TodoManagerTool, write_file::WriteFileTool,
     },
 };
 
 pub mod bash;
+pub mod check_background;
 pub mod compact;
 pub mod edit_file;
 pub mod load_skill;
 pub mod memory;
 pub mod read_file;
+pub mod run_background;
 pub mod sub_agent;
 pub mod task_create;
 pub mod task_get;
@@ -52,6 +56,7 @@ pub fn agent_tools(
     registry: Arc<SkillRegistry>,
     memory_manager: Arc<Mutex<MemoryManager>>,
     task_manager: SharedTaskManager,
+    bg_manager: SharedBackgroundManager,
 ) -> Tools {
     HashMap::from([
         ("bash".into(), Box::new(BashTool) as Box<dyn Tool>),
@@ -71,7 +76,11 @@ pub fn agent_tools(
         ),
         (
             "task".into(),
-            Box::new(SubAgentTool::new(registry.clone(), memory_manager.clone())) as Box<dyn Tool>,
+            Box::new(SubAgentTool::new(
+                registry.clone(),
+                memory_manager.clone(),
+                bg_manager.clone(),
+            )) as Box<dyn Tool>,
         ),
         (
             "todo".into(),
@@ -80,6 +89,14 @@ pub fn agent_tools(
         (
             "task_create".into(),
             Box::new(TaskCreateTool::new(task_manager)) as Box<dyn Tool>,
+        ),
+        (
+            "run_background".into(),
+            Box::new(RunBackgroundTool::new(bg_manager.clone())) as Box<dyn Tool>,
+        ),
+        (
+            "check_background".into(),
+            Box::new(CheckBackgroundTool::new(bg_manager)) as Box<dyn Tool>,
         ),
     ])
 }

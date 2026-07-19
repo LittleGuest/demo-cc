@@ -7,7 +7,7 @@ edition = "2024"
 anthropic-ai-sdk = "0.2.27"
 anyhow = "1.0.102"
 async-trait = "0.1.89"
-chrono = "0.4.44"
+chrono = { version = "0.4.44", features = ["serde"] }
 cron = "0.16"
 derive_builder = "0.20.2"
 dotenvy = "0.15.7"
@@ -22,7 +22,15 @@ syn = { version = "2.0.111", features = ["full"] }
 strum = "0.28.0"
 strum_macros = "0.28.0"
 tera = "1.20.1"
-tokio = { version = "1.52.1", features = ["rt-multi-thread", "macros", "rt"] }
+tokio = { version = "1.52.1", features = [
+  "rt-multi-thread",
+  "macros",
+  "rt",
+  "fs",
+  "process",
+  "sync",
+  "time",
+] }
 walkdir = "2.5.0"
 wildmatch = "2.5.0"
 proc-macro2 = "1.0.103"

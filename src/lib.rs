@@ -20,6 +20,7 @@ use chrono::Utc;
 use inquire::Select;
 
 use crate::{
+    backgroud::SharedBackgroundManager,
     compact::CompactState,
     hook::{
         Hook, HookControl, HookTypes, PostToolUseFn, PreToolUseFn, SessionStartFn, ToolResult,
@@ -32,6 +33,7 @@ use crate::{
     tool::Tools,
 };
 
+pub mod backgroud;
 pub mod compact;
 pub mod hook;
 pub mod memory;
@@ -125,6 +127,7 @@ pub struct LoopState {
     pub hooks: Vec<Hook>,
     pub skill_registry: Arc<SkillRegistry>,
     pub memory_manager: Arc<Mutex<MemoryManager>>,
+    pub bg_manager: SharedBackgroundManager,
 }
 
 impl LoopState {
@@ -135,6 +138,7 @@ impl LoopState {
         permission_manager: PermissionManager,
         skill_registry: Arc<SkillRegistry>,
         memory_manager: Arc<Mutex<MemoryManager>>,
+        bg_manager: SharedBackgroundManager,
     ) -> Self {
         Self {
             client,
@@ -147,6 +151,7 @@ impl LoopState {
             hooks: Vec::new(),
             skill_registry,
             memory_manager,
+            bg_manager,
         }
     }
 
@@ -318,9 +323,22 @@ impl LoopState {
         true
     }
 
+    fn inject_background_results(&mut self) -> Result<()> {
+        if self.context.is_empty() {
+            return Ok(());
+        }
+        let Some(message) = self.bg_manager.background_results_message() else {
+            return Ok(());
+        };
+        self.context.push(Message::new_text(Role::User, message));
+        Ok(())
+    }
+
     pub async fn agent_loop(&mut self) -> anyhow::Result<()> {
         let mut recovery = RecoveryState::default();
         for _ in 0..self.max_round {
+            self.inject_background_results()?;
+
             compact::micro_compact(&mut self.context);
 
             let system_prompt = self.build_system_prompt()?;
