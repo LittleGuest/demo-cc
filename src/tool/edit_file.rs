@@ -1,9 +1,10 @@
-use crate::tool::{ToolContext, safe_path};
 use anyhow::Result;
-use tool_macros::tool;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use tokio::fs;
+use tool_macros::tool;
+
+use crate::tool::{ToolContext, safe_path};
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct EditFileInput {

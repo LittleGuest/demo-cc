@@ -1,8 +1,8 @@
 use anthropic_ai_sdk::types::message::{Message, Role};
 use anyhow::Result;
-use tool_macros::tool;
 use schemars::JsonSchema;
 use serde::Deserialize;
+use tool_macros::tool;
 
 use crate::{
     Agent, AgentSystemPrompt, extract_text, get_llm_client,

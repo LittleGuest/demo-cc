@@ -1,7 +1,7 @@
 use anyhow::Result;
-use tool_macros::tool;
 use schemars::JsonSchema;
 use serde::Deserialize;
+use tool_macros::tool;
 
 use crate::tool::ToolContext;
 

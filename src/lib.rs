@@ -14,8 +14,9 @@ pub mod team;
 pub mod tool;
 pub mod worktree;
 
-pub use anthropic_ai_sdk::types::message::Tool as ToolSpec;
+use std::path::Path;
 
+pub use anthropic_ai_sdk::types::message::Tool as ToolSpec;
 use anthropic_ai_sdk::{
     client::{AnthropicClient, AnthropicClientBuilder},
     types::message::{
@@ -25,24 +26,26 @@ use anthropic_ai_sdk::{
 };
 use anyhow::{Context, Result};
 use chrono::Utc;
-use std::path::Path;
 
-use crate::compact::{
-    CompactState, compacted_context, estimate_context_size, micro_compact, persist_large_output,
-    write_transcript,
+use crate::{
+    compact::{
+        CompactState, compacted_context, estimate_context_size, micro_compact,
+        persist_large_output, write_transcript,
+    },
+    hook::{
+        Hook, HookControl, HookTypes, PostToolUseFn, PreToolUseFn, SessionStartFn, ToolResult,
+        ToolUse,
+    },
+    mcp::MCPToolRouter,
+    memory::MEMORY_GUIDANCE,
+    permission::{PermissionBehavior, PermissionManager},
+    prompt::SystemPrompt,
+    recovery::{
+        CONTINUATION_MESSAGE, MAX_RECOVERY_ATTEMPTS, RecoveryState, backoff_delay,
+        is_prompt_too_long_error, is_transient_transport_error,
+    },
+    tool::{ToolContext, ToolRouter},
 };
-use crate::hook::{
-    Hook, HookControl, HookTypes, PostToolUseFn, PreToolUseFn, SessionStartFn, ToolResult, ToolUse,
-};
-use crate::mcp::MCPToolRouter;
-use crate::memory::MEMORY_GUIDANCE;
-use crate::permission::{PermissionBehavior, PermissionManager};
-use crate::prompt::SystemPrompt;
-use crate::recovery::{
-    CONTINUATION_MESSAGE, MAX_RECOVERY_ATTEMPTS, RecoveryState, backoff_delay,
-    is_prompt_too_long_error, is_transient_transport_error,
-};
-use crate::tool::{ToolContext, ToolRouter};
 
 pub fn get_model() -> anyhow::Result<String> {
     dotenvy::dotenv().ok();

@@ -1,5 +1,6 @@
-use anyhow::Result;
 use std::pin::Pin;
+
+use anyhow::Result;
 
 use crate::LoopState;
 

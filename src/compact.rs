@@ -1,11 +1,12 @@
-use anthropic_ai_sdk::types::message::{ContentBlock, Message, MessageContent, Role};
-use anyhow::Context as _;
 use std::{
     fs::{self, File},
     io::{BufWriter, Write},
     path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
+
+use anthropic_ai_sdk::types::message::{ContentBlock, Message, MessageContent, Role};
+use anyhow::Context as _;
 
 const KEEP_RECENT_TOOL_RESULTS: usize = 3;
 const PERSIST_THRESHOLD: usize = 30_000;

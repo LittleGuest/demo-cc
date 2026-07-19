@@ -1,9 +1,9 @@
 use anyhow::Result;
 use schemars::JsonSchema;
 use serde::Deserialize;
+use tool_macros::tool;
 
 use crate::tool::ToolContext;
-use tool_macros::tool;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct LoadSkillInput {

@@ -1,7 +1,8 @@
+use std::fmt;
+
 use anyhow::{Context, Result};
 use inquire::Select;
 use serde_json::Value;
-use std::fmt;
 use strum_macros::{Display, EnumString};
 
 const READ_PREFIXES: &[&str] = &[
